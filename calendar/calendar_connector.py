@@ -16,7 +16,10 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
-# Кортеж сетевых исключений, которые могут возникнуть при работе с Google API
+# Основной календарь пользователя: единственный календарь, с которым работает модуль.
+PRIMARY_CALENDAR_ID = "primary"
+
+# Кортеж сетевых исключений, которые могут возникнуть при работе с Google API.
 NETWORK_EXCEPTIONS = (HttpError, httplib2.HttpLib2Error, TransportError, OSError)
 
 
@@ -42,14 +45,14 @@ class TokenStorageProtocol(Protocol):
 def _is_retryable_error(exc: BaseException) -> bool:
     """
     Определяет, является ли ошибка временным сетевым сбоем или перегрузкой сервера Google.
-    Повторяем запрос при HTTP 429, 500, 502, 503, 504 и любых сетевых обрывах (OSError / TransportError).
+    Повторяем запрос при HTTP 429, 500, 502, 503, 504 и любых сетевых обрывах.
     """
     if isinstance(exc, HttpError):
         return exc.resp.status in (429, 500, 502, 503, 504)
     return isinstance(exc, (httplib2.HttpLib2Error, TransportError, OSError))
 
 
-# Выполнение требования NF-07: >= 3 попыток с экспоненциальной задержкой
+# Выполнение требования NF-07: не менее трёх попыток с экспоненциальной задержкой.
 @retry(
     reraise=True,
     stop=stop_after_attempt(3),
@@ -69,7 +72,7 @@ def _execute_request(request_callable) -> dict[str, Any] | None:
 def get_calendar_service(user_id: int, token_storage: TokenStorageProtocol):
     """
     Загружает токен пользователя из БД, при необходимости обновляет его через refresh_token
-    и возвращает инициализированный клиент Google Calendar API v3 (NF-29).
+    и возвращает клиент Google Calendar API v3 (NF-29).
     """
     token_data = token_storage.get_user_token(user_id)
     if not token_data or not isinstance(token_data, dict):
@@ -113,10 +116,10 @@ def create_event(
     user_id: int,
     token_storage: TokenStorageProtocol,
     event_data: dict[str, Any],
-    calendar_id: str = "primary",
 ) -> dict[str, Any]:
     """
-    Создаёт разовое (F-B-09) или повторяющееся событие через RRULE (F-B-10) в выбранном календаре.
+    Создаёт разовое (F-B-09) или повторяющееся событие через RRULE (F-B-10)
+    в основном календаре пользователя.
     """
     try:
         _validate_required_event_fields(event_data)
@@ -131,7 +134,11 @@ def create_event(
         }
 
         if event_data.get("attendees"):
-            event_body["attendees"] = [{"email": str(mail).strip()} for mail in event_data["attendees"] if mail]
+            event_body["attendees"] = [
+                {"email": str(mail).strip()}
+                for mail in event_data["attendees"]
+                if mail
+            ]
 
         if event_data.get("recurrence"):
             rec = event_data["recurrence"]
@@ -145,19 +152,26 @@ def create_event(
             event_body["recurrence"] = [rrule_string]
             logger.info(f"Сформировано правило повторения для user_id={user_id}: {rrule_string}")
 
-        logger.info(f"Отправка события '{event_body['summary']}' в календарь '{calendar_id}' (user_id={user_id})")
-        req = service.events().insert(calendarId=calendar_id, body=event_body)
+        logger.info(
+            f"Отправка события '{event_body['summary']}' в основной календарь "
+            f"(user_id={user_id})"
+        )
+        req = service.events().insert(calendarId=PRIMARY_CALENDAR_ID, body=event_body)
         created_event = _execute_request(req) or {}
 
         return {
             "status": "success",
             "event_id": created_event.get("id"),
             "html_link": created_event.get("htmlLink"),
-            "calendar_id": calendar_id,
         }
 
     except CalendarAuthError as auth_err:
-        return {"status": "error", "error_type": "auth_error", "message": str(auth_err), "need_queue": False}
+        return {
+            "status": "error",
+            "error_type": "auth_error",
+            "message": str(auth_err),
+            "need_queue": False,
+        }
     except NETWORK_EXCEPTIONS as api_err:
         logger.error(f"Сбой Google API при создании события для user_id={user_id}: {api_err}")
         is_unavailable = _is_retryable_error(api_err)
@@ -169,7 +183,12 @@ def create_event(
         }
     except Exception as err:
         logger.error(f"Ошибка валидации данных при создании события: {err}")
-        return {"status": "error", "error_type": "validation_error", "message": str(err), "need_queue": False}
+        return {
+            "status": "error",
+            "error_type": "validation_error",
+            "message": str(err),
+            "need_queue": False,
+        }
 
 
 def update_event_time(
@@ -179,9 +198,8 @@ def update_event_time(
     new_start_time: str,
     new_end_time: str,
     timezone: str = "Europe/Moscow",
-    calendar_id: str = "primary",
 ) -> dict[str, Any]:
-    """Переносит существующую встречу на новое время (F-B-17, F-M-11)."""
+    """Переносит существующую встречу в основном календаре пользователя (F-B-17, F-M-11)."""
     try:
         if not event_id or not new_start_time or not new_end_time:
             raise ValueError("Не указаны event_id, new_start_time или new_end_time для переноса события")
@@ -191,15 +209,25 @@ def update_event_time(
             "start": {"dateTime": new_start_time, "timeZone": timezone},
             "end": {"dateTime": new_end_time, "timeZone": timezone},
         }
-        req = service.events().patch(calendarId=calendar_id, eventId=event_id, body=patch_body)
+        req = service.events().patch(
+            calendarId=PRIMARY_CALENDAR_ID,
+            eventId=event_id,
+            body=patch_body,
+        )
         updated = _execute_request(req) or {}
-        logger.info(f"Время события {event_id} в календаре '{calendar_id}' успешно изменено.")
-        return {"status": "success", "event_id": updated.get("id"), "calendar_id": calendar_id}
+
+        logger.info(f"Время события {event_id} в основном календаре успешно изменено.")
+        return {"status": "success", "event_id": updated.get("id")}
 
     except CalendarAuthError as auth_err:
-        return {"status": "error", "error_type": "auth_error", "message": str(auth_err), "need_queue": False}
+        return {
+            "status": "error",
+            "error_type": "auth_error",
+            "message": str(auth_err),
+            "need_queue": False,
+        }
     except NETWORK_EXCEPTIONS as api_err:
-        logger.error(f"Ошибка API при переносе события {event_id} в календаре '{calendar_id}': {api_err}")
+        logger.error(f"Ошибка API при переносе события {event_id}: {api_err}")
         is_unavailable = _is_retryable_error(api_err)
         return {
             "status": "error",
@@ -209,30 +237,46 @@ def update_event_time(
         }
     except Exception as error:
         logger.error(f"Ошибка валидации при переносе события {event_id}: {error}")
-        return {"status": "error", "error_type": "validation_error", "message": str(error), "need_queue": False}
+        return {
+            "status": "error",
+            "error_type": "validation_error",
+            "message": str(error),
+            "need_queue": False,
+        }
 
 
 def delete_event(
     user_id: int,
     token_storage: TokenStorageProtocol,
     event_id: str,
-    calendar_id: str = "primary",
 ) -> dict[str, Any]:
-    """Удаляет разовое событие или всю серию повторений по его ID (F-B-16, F-B-18, F-M-10, F-M-12)."""
+    """
+    Удаляет разовое событие или всю серию повторений из основного календаря
+    пользователя (F-B-16, F-B-18, F-M-10, F-M-12).
+    """
     try:
         if not event_id:
             raise ValueError("Не указан event_id для удаления события")
 
         service = get_calendar_service(user_id=user_id, token_storage=token_storage)
-        req = service.events().delete(calendarId=calendar_id, eventId=event_id)
+        req = service.events().delete(
+            calendarId=PRIMARY_CALENDAR_ID,
+            eventId=event_id,
+        )
         _execute_request(req)
-        logger.info(f"Событие {event_id} из календаря '{calendar_id}' успешно удалено.")
-        return {"status": "success", "calendar_id": calendar_id}
+
+        logger.info(f"Событие {event_id} из основного календаря успешно удалено.")
+        return {"status": "success"}
 
     except CalendarAuthError as auth_err:
-        return {"status": "error", "error_type": "auth_error", "message": str(auth_err), "need_queue": False}
+        return {
+            "status": "error",
+            "error_type": "auth_error",
+            "message": str(auth_err),
+            "need_queue": False,
+        }
     except NETWORK_EXCEPTIONS as api_err:
-        logger.error(f"Ошибка API при удалении события {event_id} из календаря '{calendar_id}': {api_err}")
+        logger.error(f"Ошибка API при удалении события {event_id}: {api_err}")
         is_unavailable = _is_retryable_error(api_err)
         return {
             "status": "error",
@@ -242,4 +286,9 @@ def delete_event(
         }
     except Exception as error:
         logger.error(f"Ошибка валидации при удалении события {event_id}: {error}")
-        return {"status": "error", "error_type": "validation_error", "message": str(error), "need_queue": False}
+        return {
+            "status": "error",
+            "error_type": "validation_error",
+            "message": str(error),
+            "need_queue": False,
+        }
