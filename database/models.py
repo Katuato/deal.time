@@ -15,6 +15,7 @@ async def add_user(user_id: int, ):
         user = await get_user(user_id)
         if not user:
             action = session.add(User(user_id=user_id))
+            await session.commit()
             return action
         return user
 async def del_user(user_id: int):

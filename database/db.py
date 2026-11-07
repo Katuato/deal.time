@@ -1,15 +1,35 @@
+import base64
+import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON
+from config import db_logpass, db_ipport, secret_key
 
 DB_URL = (
-    'postgresql+asyncpg://hollywood:1234567890'
-    '@localhost:5432/deal.time'
+    f'postgresql+asyncpg://{db_logpass}'
+    f'{db_ipport}/deal.time'
 )
 engine = create_async_engine(DB_URL, echo=True)
 async_session = async_sessionmaker(bind=engine, expire_on_commit=False)
+SECRET_KEY = f"{secret_key}"
+fernet = Fernet(SECRET_KEY)
 session = async_session()
 
+class EncryptedString(sa.TypeDecorator):
+    impl = sa.Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            return fernet.encrypt(value.encode('utf-8')).decode('utf-8')
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            return fernet.decrypt(value.encode('utf-8')).decode('utf-8')
+        return value
+    
 class Base(AsyncAttrs, DeclarativeBase):
     pass
 class Consent(Base):
@@ -29,8 +49,8 @@ class Connection(Base):
     __tablename__ = 'connections'
     id = Column(Integer, index=True, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.user_id"), unique=True)
-    google_token = Column(String, default=None)
-    business_token = Column(String, default=None)
+    google_token = Column(EncryptedString, default=None)
+    business_token = Column(EncryptedString, default=None)
     status = Column(Boolean, default=None)
 class Chat(Base):
     __tablename__ = 'chats'
@@ -44,7 +64,6 @@ class Event(Base):
     user_id = Column(BigInteger, ForeignKey("users.user_id"))
     chat_id = Column(BigInteger)
     calendar_conn_id = '' #непонятно
-    source_msg_id = '' #непонятно зачем
     title = Column(String)
     location = Column(String)
     starts_at = Column(DateTime)
@@ -61,10 +80,10 @@ class Operation(Base):
     id = Column(Integer, index=True, primary_key=True)
     event_id = Column(BigInteger) #ForeignKey("с чем связано то")
     action = Column(String)
-    '''data = Column(JSON) #chto hranitsya???'''
+    data = Column(JSON)
     status = Column(String)
-'''    attempts = Column(Integer) #chto etooooo
-    next_attempt_at = Column(DateTime) #i etooooo'''
+    attempts = Column(Integer)
+    next_attempt_at = Column(DateTime)
 
 
 

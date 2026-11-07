@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 from datetime import datetime
 from config import bot
 from database.models import add_user, add_consent, get_consent, get_buss_conn, add_buss_conn
-
 us = Router()
 def goto_settings_button():
     kb = InlineKeyboardBuilder()
@@ -54,6 +53,8 @@ async def user_consent_accept(call: CallbackQuery):
     date = datetime.now(tz=ZoneInfo("Europe/Moscow")).replace(tzinfo=None, microsecond=0)
     await add_consent(user_id=call.from_user.id, policy_version='123', accepted_at=date)
     await call.answer("✅ Пользовательское соглашение принято")
+    user = await add_user(user_id=call.from_user.id)
+    print(user)
     await call.message.edit_text("Добро пожаловать в Telegram-ассистент <b>ДЕЛУ.ВРЕМЯ</b>\nДля продолжения подключите ассисента к своему аккаунту.\n\n"
                                  "Нажмите кнопку ниже, перейдите в раздел 'Автоматизация чатов', и добавьте нашего бота: <code>@deluvremyabot</code>",
                                  reply_markup=goto_settings_button())
