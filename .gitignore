@@ -226,3 +226,5 @@ calendar/*.pem
 calendar/*.key
 calendar/.env.*
 calendar/!.env.example
+
+config.py
