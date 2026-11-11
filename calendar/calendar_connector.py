@@ -140,13 +140,29 @@ def _build_idempotent_event_id(user_id: int, event_data: dict[str, Any]) -> str:
 
 
 async def create_event(
-    user_id: int,
-    token_storage: TokenStorageProtocol,
-    event_data: dict[str, Any],
+        user_id: int,
+        token_storage: TokenStorageProtocol,
+        event_data: dict[str, Any],
 ) -> dict[str, Any]:
     """F-B-09 (разовое) + F-B-10 (RRULE)."""
     service = None
     try:
+        # --- НОВЫЙ БЛОК: Автоподстановка времени окончания (Fallback) ---
+        from datetime import datetime, timedelta
+
+        if not event_data.get("end_time") and event_data.get("start_time"):
+            try:
+                # Парсим время начала (например, "2026-11-15T15:00:00+03:00")
+                start_dt = datetime.fromisoformat(event_data["start_time"])
+                # Прибавляем 1 час
+                end_dt = start_dt + timedelta(hours=1)
+                # Записываем обратно в строку ISO
+                event_data["end_time"] = end_dt.isoformat()
+                logger.info("end_time не передан. Автоматически установлено: %s", event_data["end_time"])
+            except ValueError:
+                pass  # Если формат кривой, пусть падает на валидации ниже
+        # ---------------------------------------------------------------
+
         _validate_required_event_fields(event_data)
         service = await get_calendar_service(user_id=user_id, token_storage=token_storage)
         timezone = event_data.get("timezone") or DEFAULT_TIMEZONE

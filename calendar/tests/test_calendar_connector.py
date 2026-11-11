@@ -23,6 +23,7 @@ from rrule_builder import build_rrule
 from tenacity import wait_none
 from calendar_connector import _execute_request
 
+
 @pytest.fixture(autouse=True)
 def _fast_retries_in_tests(monkeypatch):
     """
@@ -37,6 +38,7 @@ PRIMARY_CALENDAR_ID = "primary"
 
 class FakeDBTokenStorage:
     """Async-мок хранилища — БД не требуется."""
+
     def __init__(self, initial_tokens: dict[int, dict] | None = None):
         self.db = initial_tokens or {}
         self.saved_calls = 0
@@ -179,10 +181,11 @@ async def test_invalid_token_without_refresh_token(mock_from_info, mock_build):
 
 # ---------------- Валидация обязательных полей ----------------
 
-@pytest.mark.parametrize("missing_field", ["summary", "start_time", "end_time"])
+# ИЗМЕНЕНИЕ 1: убрали end_time из проверки обязательных полей
+@pytest.mark.parametrize("missing_field", ["summary", "start_time"])
 @patch("calendar_connector.get_calendar_service")
 async def test_create_event_missing_required_field_returns_validation_error(
-    mock_get_service, missing_field,
+        mock_get_service, missing_field,
 ):
     event_data = get_valid_event_data()
     event_data.pop(missing_field)
@@ -195,6 +198,32 @@ async def test_create_event_missing_required_field_returns_validation_error(
     assert res["need_queue"] is False
     assert missing_field in res["message"]
     mock_get_service.assert_not_called()
+
+
+# ИЗМЕНЕНИЕ 2: добавили тест на автоподстановку 1 часа
+@patch("calendar_connector.get_calendar_service")
+async def test_create_event_autofills_end_time_if_missing(mock_get_service):
+    """Если end_time нет, код должен сам прибавить 1 час к start_time."""
+    mock_service = MagicMock()
+    mock_req = MagicMock()
+    mock_req.execute.return_value = {"id": "evt_autofill", "htmlLink": "..."}
+    mock_service.events.return_value.insert.return_value = mock_req
+    mock_get_service.return_value = mock_service
+
+    event_data = get_valid_event_data()
+    event_data.pop("end_time")  # Удаляем end_time!
+
+    res = await create_event(
+        user_id=1, token_storage=FakeDBTokenStorage(), event_data=event_data,
+    )
+
+    assert res["status"] == "success"
+
+    # Проверяем, что в Google ушло правильное время окончания (10:00 + 1 час = 11:00)
+    kwargs = mock_service.events.return_value.insert.call_args.kwargs
+    body = kwargs["body"]
+    assert body["start"]["dateTime"] == "2026-11-01T10:00:00"
+    assert body["end"]["dateTime"] == "2026-11-01T11:00:00"  # Код сам поставил 11:00
 
 
 # ---------------- Создание события ----------------
