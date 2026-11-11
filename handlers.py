@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import os
+import tempfile
 from aiogram import Router, types, F
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dateparser.search import search_dates
@@ -9,6 +11,7 @@ from config import bot
 from stt_module import STTProcessor
 from nlp_module import extract_entities_async
 from database.models import get_buss_conn, add_buss_conn
+log = logging.getLogger("delu.handlers")
 rt = Router()
 stt = STTProcessor()
 
@@ -28,24 +31,54 @@ async def check_business_conn(bus_conn: types.BusinessConnection):
 
         await bot.send_message(chat_id=user.user_id, text=text)
 
+# Статусы NLP, при которых пользователю показывается карточка события.
+# "no_event" (обычная переписка) и "error" — молча пропускаем.
+EVENT_STATUSES = {"ok", "needs_clarification"}
+
+
+async def transcribe_voice(voice: types.Voice) -> str | None:
+    """Скачивает голосовое во временный файл и распознаёт его в фоновом потоке STT.
+    Возвращает текст или None, если распознать не удалось."""
+    fd, path = tempfile.mkstemp(prefix="voice_", suffix=".ogg")
+    os.close(fd)
+    try:
+        file_info = await bot.get_file(voice.file_id)
+        await bot.download(file_info, destination=path)
+        return await stt.transcribe_async(audio_path=path)
+    except Exception:
+        log.exception("STT failed for voice %s", voice.file_unique_id)
+        return None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 @rt.business_message()
 async def new_message(msg: types.Message):
-    if msg.chat.type=='private':
-        buss_conn = await bot.get_business_connection(msg.business_connection_id)
-        if msg.voice:
-            file_id = msg.voice.file_id
-            file_info = await bot.get_file(file_id)
-            file_destination = f'voices/{file_id}.ogg'
-            await bot.download(file_info, destination=file_destination)
-            text = stt.transcribe(audio_path=file_destination)
-            os.remove(file_destination)
-        else:
-            text = msg.text
-        print(text)
-        answ = await extract_entities_async(text=text)
-        print(answ)
-        if answ is not None:
-            await new_event(answ, user_id=buss_conn.user.id)
+    if msg.chat.type != 'private':
+        return
+    buss_conn = await bot.get_business_connection(msg.business_connection_id)
+
+    if msg.voice:
+        text = await transcribe_voice(msg.voice)
+    else:
+        # стикеры, фото без подписи и т.п. текста не содержат
+        text = msg.text or msg.caption
+    if not text or not text.strip():
+        log.debug("message %s: no text, skipped", msg.message_id)
+        return
+
+    answ = await extract_entities_async(text=text, message_time=msg.date)
+    status = answ.get("status") if isinstance(answ, dict) else None
+    log.info("message %s: nlp status=%s", msg.message_id, status)
+
+    if status in EVENT_STATUSES:
+        await new_event(answ, user_id=buss_conn.user.id)
+    elif status == "error":
+        log.warning("message %s: nlp error=%s", msg.message_id, answ.get("error"))
+    # status == "no_event": в сообщении нет договорённости — ничего не отправляем
 
 async def new_event(answ, user_id):
     kb = InlineKeyboardBuilder()
