@@ -3,16 +3,32 @@ STT-модуль проекта «ДЕЛУ.ВРЕМЯ».
 Распознаёт русскую речь из аудиофайлов (.ogg, .wav, .mp3) с помощью Whisper-large-v3.
 Автор: Николай Воронов (НВ)
 """
+import asyncio
+import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
+
 import torch
 from transformers import pipeline
+
+log = logging.getLogger("delu.stt")
+
 
 class STTProcessor:
     """
     Класс для распознавания речи с помощью OpenAI Whisper.
     Автоматически использует MPS (Apple Silicon) или CPU.
+
+    В боте используйте transcribe_async(): распознавание идёт в отдельном фоновом
+    потоке и не блокирует event loop aiogram (бот продолжает отвечать другим
+    пользователям, пока Whisper работает).
     """
-    
+
+    # Один рабочий поток на весь процесс: pipeline не потокобезопасен, а модель
+    # одна. Голосовые встают в очередь и распознаются по одному, при этом
+    # общий пул asyncio.to_thread (его использует NLP) не занимается.
+    _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
+
     def __init__(self, model_name: str = "openai/whisper-large-v3"):
         """
         Инициализация модели. Загружается один раз при создании экземпляра.
@@ -58,3 +74,14 @@ class STTProcessor:
         )
         
         return result["text"].strip()
+
+    async def transcribe_async(self, audio_path: str, language: str = "russian") -> str:
+        """
+        Асинхронная обёртка над transcribe() для aiogram/asyncio.
+
+        Распознавание выполняется в фоновом потоке STT, event loop не блокируется.
+        Исключения transcribe() (FileNotFoundError, ValueError, ошибки модели)
+        пробрасываются вызывающему коду.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, self.transcribe, audio_path, language)
