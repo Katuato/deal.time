@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+calendar/token.json
+calendar/credentials.json
+calendar/client_secret*.json
+calendar/*.pem
+calendar/*.key
+calendar/.env.*
+calendar/!.env.example
+
+config.py

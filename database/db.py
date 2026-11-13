@@ -5,7 +5,7 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON
 from config import db_logpass, db_ipport, secret_key
-
+print(5//2)
 DB_URL = (
     f'postgresql+asyncpg://{db_logpass}'
     f'{db_ipport}/deal.time'
