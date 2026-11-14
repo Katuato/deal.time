@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 
-# --- ИЗМЕНЕНИЕ 1: Функция для разбора строки RRULE (Пункт 3) ---
+# --- Функция для разбора строки RRULE (Пункт 3) ---
 def _parse_rrule_string(rrule_str: str) -> dict:
     """Разбирает строку 'FREQ=WEEKLY;INTERVAL=2;BYDAY=WE,FR' в словарь для build_rrule."""
     if not rrule_str:
@@ -31,7 +31,7 @@ def _parse_rrule_string(rrule_str: str) -> dict:
     return result
 
 
-# --- ИЗМЕНЕНИЕ 2: Функция для конвертации UTC-смещения в IANA (Пункт 6) ---
+# --- Функция для конвертации UTC-смещения в IANA (Пункт 6) ---
 def _ensure_iana_timezone(tz_str: str, fallback_tz: str = "Europe/Moscow") -> str:
     """Превращает 'UTC+05:00' в 'Asia/Yekaterinburg'."""
     if not tz_str:
@@ -55,7 +55,7 @@ def _ensure_iana_timezone(tz_str: str, fallback_tz: str = "Europe/Moscow") -> st
     return utc_offsets.get(tz_str, fallback_tz)
 
 
-# --- ИЗМЕНЕНИЕ 3: Главная функция адаптера (Пункты 1, 2, 4, 5, 7) ---
+# --- Главная функция адаптера ---
 def adapt_nlp_to_calendar(nlp_event: dict, user_tz: str = "Europe/Moscow") -> dict:
     """
     Принимает словарь от NLP-модуля, возвращает словарь для create_event.
@@ -71,19 +71,26 @@ def adapt_nlp_to_calendar(nlp_event: dict, user_tz: str = "Europe/Moscow") -> di
     # Пункт 1: summary
     summary = nlp_event.get("summary") or "Встреча"
 
-    # Пункт 2: Время начала и окончания
+    # Пункт 2: Время начала и окончания (ИСПРАВЛЕНО)
     start_time = starts_at
     end_time = nlp_event.get("ends_at")
 
     if not end_time:
-        duration = nlp_event.get("duration_minutes")
-        if duration:
-            try:
-                dt = datetime.fromisoformat(start_time)
+        try:
+            # Парсим время начала, чтобы прибавить к нему минуты
+            dt = datetime.fromisoformat(start_time)
+            duration = nlp_event.get("duration_minutes")
+
+            if duration:
+                # Если duration_minutes есть, прибавляем его
                 end_time = (dt + timedelta(minutes=int(duration))).isoformat()
-            except ValueError:
-                end_time = None
-        # Если duration нет, end_time останется None, и create_event сам прибавит 60 минут по умолчанию
+            else:
+                # Если duration_minutes нет, прибавляем 60 минут по умолчанию
+                end_time = (dt + timedelta(minutes=60)).isoformat()
+        except ValueError:
+            # Если start_time пришел в кривом формате, оставляем None
+            # (calendar_connector потом выдаст ошибку валидации)
+            end_time = None
 
     # Пункт 3: RRULE (вызываем функцию парсинга строки)
     rrule_input = nlp_event.get("rrule") or nlp_event.get("recurrence")
