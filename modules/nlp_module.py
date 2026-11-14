@@ -25,7 +25,8 @@ from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator
-from config import logger as log
+
+log = logging.getLogger("delu.nlp")
 
 MODEL_NAME = "RaguTeam/RAGU-lm"
 DEFAULT_TZ = "Europe/Moscow"
@@ -235,6 +236,10 @@ def find_times(text: str) -> List[Tuple[int, str, bool]]:
                 h = ORDINALS[g[0]] - 1 or 12
                 values = [(apply_period(h, g[1]) if g[1] else (h + 12 if h <= 6 else h), 30)]
             elif kind == "period":
+                # "на 3 дня" — длительность, "в 3 дня" — время суток.
+                if g[1] == "дня" and not re.search(r"\bчас\w*\s+дня\b", m.group(0)):
+                    if not re.search(r"\b(?:в|к|с|до|около)\s*$", t[:m.start()]):
+                        continue
                 h = int(g[0]) if g[0].isdigit() else SMALL_HOURS[g[0]]
                 values = [(apply_period(h, g[1]), 0)] if h <= 23 else []
             elif kind == "dative":
@@ -300,6 +305,15 @@ DATE_PATTERNS = [
 def find_date(text: str) -> Optional[str]:
     """Дата в одном виде: "завтра", "в пятницу", "в следующую среду", "25 ноября", "5 числа"."""
     t = low(text)
+    correction = RE_DATE_CORRECTION.search(t)
+    if correction:
+        return find_date(correction.group(1))
+    start_date = recurrence_start_date(t)
+    if start_date:
+        return start_date
+    relative_days = re.search(r"\bчерез\s+(\d{1,4})\s+(?:день|дня|дней|сутки|суток)\b", t)
+    if relative_days:
+        return re.sub(r"\s+", " ", relative_days.group(0))
     for kind, rx in DATE_PATTERNS:
         for m in rx.finditer(t):
             if kind == "next":
@@ -329,9 +343,18 @@ def find_date(text: str) -> Optional[str]:
 def resolve_date(phrase: Optional[str], now: datetime) -> Optional[datetime]:
     if not phrase:
         return None
-    import dateparser
     base = now.replace(tzinfo=None)
     p = low(phrase)
+    relative = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
+    if p in relative:
+        return (base + timedelta(days=relative[p])).replace(hour=0, minute=0, second=0, microsecond=0)
+    relative_days = re.fullmatch(r"через\s+(\d{1,4})\s+(?:день|дня|дней|сутки|суток)", p)
+    if relative_days:
+        return (base + timedelta(days=int(relative_days.group(1)))).replace(hour=0, minute=0, second=0, microsecond=0)
+    if p in WD_ACC:
+        target = WD_ACC.index(p)
+        return (base + timedelta(days=(target - base.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    import dateparser
     m = re.match(r"(\d{1,2}) числа", p)
     if m:
         y, mo, d = base.year, base.month, int(m.group(1))
@@ -427,20 +450,26 @@ def find_recurrence(text: str) -> Tuple[Optional[str], Optional[str]]:
     if unit == "две недели":
         interval = 2
 
+    repeat_text = re.split(r"\bначиная\s+с\b", t, maxsplit=1)[0]
+    daily = unit.startswith(("день", "дня", "дней", "ежеднев"))
     days = []
-    if re.search(r"будн", t):
+    if daily:
+        pass
+    elif re.search(r"будн", repeat_text):
         days = [0, 1, 2, 3, 4]
-    elif re.search(r"выходн", t):
+    elif re.search(r"выходн", repeat_text):
         days = [5, 6]
     else:
         for i, stem in enumerate(WD_STEMS):
-            if re.search(r"\b" + stem, t):
+            if re.search(r"\b" + stem, repeat_text):
                 days.append(i)
         for short, i in WD_SHORT.items():
-            if re.search(r"\b(?:в|во|по)\s+" + short + r"\b", t) and i not in days:
+            if re.search(r"\b(?:в|во|по)\s+" + short + r"\b", repeat_text) and i not in days:
                 days.append(i)
 
-    if unit.startswith(("месяц", "ежемес")):
+    if daily:
+        rule = "FREQ=DAILY"
+    elif unit.startswith(("месяц", "ежемес")):
         rule = "FREQ=MONTHLY"
     elif unit.startswith(("год", "ежегод")):
         rule = "FREQ=YEARLY"
@@ -486,6 +515,36 @@ def get_zone(name: Optional[str]):
 
 # ---------------------------------------------------------------- намерение
 
+RE_PAST_OPERATION = re.compile(
+    r"\b(?:отменили|отменился|отменилась|отменилось|отменились|"
+    r"задержали|задержался|задержалась|перенесли|перенесся|перенеслась)\b"
+)
+RE_EVENT_TOPIC = re.compile(
+    r"\b(?:встреч\w*|созвон\w*|совещан\w*|планерк\w*|трениров\w*|"
+    r"заняти\w*|урок\w*|собрани\w*|прием\w*|мероприяти\w*|репетици\w*|"
+    r"консультаци\w*|интервью|собеседован\w*)\b"
+)
+RE_DATE_CORRECTION = re.compile(
+    r"\bне\s+(?:(?:в|во|на|к)\s+[^,;!?]{1,45}?|сегодня|завтра|послезавтра)"
+    r"\s*,?\s+а\s+(.+)", re.I
+)
+
+
+def recurrence_start_date(text: str) -> Optional[str]:
+    match = re.search(r"\bначиная\s+с\s+(.+)", low(text))
+    if not match:
+        return None
+    tail = match.group(1)
+    for i, stem in enumerate(WD_STEMS):
+        if re.match(r"(?:этой\s+|этого\s+)?" + stem + r"\w*\b", tail):
+            return WD_ACC[i]
+    return find_date(tail)
+
+
+def has_event_topic(text: str) -> bool:
+    return bool(RE_EVENT_TOPIC.search(low(text)))
+
+
 RE_CANCEL = re.compile(r"\bотмен\w*|\bотбой\b|\bне\s+будет\b")
 RE_CANCEL_NEG = re.compile(r"\b(?:не|ни)\s+(?:\w+\s+){0,2}отмен\w*|\bотмен\w*\s+не\b")
 RE_NOT_COMING = re.compile(
@@ -495,13 +554,13 @@ RE_SOFT_CANCEL = re.compile(r"\bне\s+(?:получится|смогу|выйд
                             r"|\bникак\b(?!\s+не)")
 RE_APOLOGY = re.compile(r"\b(?:сорян|сори|сорри|извини\w*|прости\w*|увы|к\s+сожалению|блин)\b")
 RE_SERIES = re.compile(r"\bсери[юяи]\b|\bвсе\s+(?:встречи|созвоны|занятия|тренировки)\b")
-RE_MOVE = re.compile(r"перенес|перенос|сдвин|сдвиг|опозд|опазд|задерж|подвин|отлож|перекин")
+RE_MOVE = re.compile(r"перенес|перенос|сдвин|сдвиг|опозд|опазд|подвин|перекин")
 RE_NOT_BUT = re.compile(r"\bне\s+(?:в|на|к)\s+[^,.!?]{1,15}?[,\s]+а\s+(?:в|на|к)\s+\S")
 RE_PAST = re.compile(
     r"\b(?:вчера|позавчера)\b|\bв\s+прошл\w+\b|\bспасибо\s+за\b"
     r"|\b(?:был|была|было|были|прошл[аои]|прошел|звонил\w*|ходил\w*|ездил\w*|сидел\w*|посидел\w*|смотрел\w*"
     r"|играл\w*|начал\w*|закончил\w*|опоздали|встречались|виделись|прибыл\w*|приехал\w*|пришел|пришла"
-    r"|пришли|ушел|ушла|уехал\w*|отметили|получил\w*)\b")
+    r"|пришли|ушел|ушла|уехал\w*|отметили|получил\w*|отменили|отменился|отменилась|отменились|задержали|перенесли)\b")
 RE_FUTURE = re.compile(r"\b(?:завтра|послезавтра|давай\w*|будем|буду|будет|каждый|каждую|следующ\w*|пойдем"
                        r"|встретимся|созвонимся|напомни)\b")
 # справка о расписании: "магазин работает до 22:00", "поезд отправляется в 14:20"
@@ -578,6 +637,20 @@ def operation_is_negated(text: str) -> bool:
 
 def decide_intent(llm_intent: Optional[str], text: str, ctx: str) -> Optional[str]:
     t = low(text)
+    if RE_PAST_OPERATION.search(t) and not re.search(r"\bдава(?:й|йте)\b", t):
+        return None
+    topic = has_event_topic(t)
+    financial = re.search(r"\b(?:зарплат\w*|деньг\w*|платеж\w*|выплат\w*)\b", t)
+    if financial and re.search(r"\b(?:отлож\w*|задерж\w*)\b", t) and not topic:
+        return None
+    absent = re.search(r"\bне\s+будет\b", t)
+    absence_event = topic or bool(re.search(r"\bменя\s+на\b", t)) or context_agrees(ctx)
+    if absent and re.search(r"\b(?:света|дождя|воды|электричества|снега)\b", t) and not topic:
+        return None
+    if absent and not absence_event and not re.search(r"\bотмен\w*", t):
+        return None
+    if find_offset(t) and re.search(r"\b(?:буду|приеду|освобожусь|вернусь)\b", t) and not topic:
+        return None
     if operation_is_negated(t):
         return None
     if RE_PAST.search(t) and not RE_FUTURE.search(t):
@@ -585,13 +658,21 @@ def decide_intent(llm_intent: Optional[str], text: str, ctx: str) -> Optional[st
     if RE_INFO.search(t) and not RE_AGREE.search(t):
         return None
     cancel = bool(RE_CANCEL.search(t)) and not RE_CANCEL_NEG.search(t)
+    if absent and not absence_event:
+        cancel = False
     soft_cancel = (bool(RE_SOFT_CANCEL.search(t)) and not t.rstrip().endswith("?")
                    and bool(RE_APOLOGY.search(t) or find_date(t) or context_agrees(ctx)))
     times = find_times(text)
-    move = bool(RE_MOVE.search(t) or find_shift(text) or RE_NOT_BUT.search(t) or any(old for _, _, old in times))
+    contextual_move = bool(re.search(r"\b(?:отлож\w*|задерж\w*)\b", t)) and (
+        topic or bool(re.search(r"\b(?:опозд\w*|опазд\w*|задержусь|задерживаюсь)\b", t))
+        or has_when(t)
+    )
+    move = bool(RE_MOVE.search(t) or contextual_move or find_shift(text)
+                or RE_NOT_BUT.search(t) or RE_DATE_CORRECTION.search(t)
+                or any(old for _, _, old in times))
     if cancel or soft_cancel or RE_NOT_COMING.search(t):
         # "отмени, перенесем на 17:00" - это перенос
-        if RE_MOVE.search(t) and any(not old for _, _, old in times):
+        if (RE_MOVE.search(t) or contextual_move) and any(not old for _, _, old in times):
             return "move"
         return "cancel"
     if move:
@@ -605,7 +686,7 @@ def decide_intent(llm_intent: Optional[str], text: str, ctx: str) -> Optional[st
         if RE_AGREE.search(t) or own_when or ((is_confirmation(text) or is_fragment(text)) and context_agrees(ctx)):
             llm_intent = "create"
     if llm_intent is None:
-        if find_offset(text) and not re.search(r"\b(?:будет|начнется|закончится|пройдет)\b", t):
+        if find_offset(text) and not re.search(r"\b(?:будет|буду|приеду|освобожусь|вернусь|начнется|закончится|пройдет)\b", t):
             return "create"
         if (is_confirmation(text) or is_fragment(text)) and context_agrees(ctx) and has_when(ctx + " " + text):
             # "ок" на "перенесем на пятницу?" - согласие на перенос
@@ -673,7 +754,7 @@ def postprocess(text: str, data: dict, context: Optional[List[str]] = None,
     elif own:
         ev.time = own[0][1]
     elif ctx_list:
-        latest_time_ctx = next((c for c in reversed(ctx_list) if any(not x[2] for x in find_times(c)) or any(not x[2] for x in find_bare_hours(c))), "")
+        latest_time_ctx = next((c for c in reversed(ctx_list) if context_agrees(c) and (any(not x[2] for x in find_times(c)) or any(not x[2] for x in find_bare_hours(c)))), "")
         ctx_times = [x[1] for x in find_times(latest_time_ctx) if not x[2]]
         ctx_bare = [x[1] for x in find_bare_hours(latest_time_ctx) if not x[2]]
         if ctx_times:
@@ -700,8 +781,8 @@ def postprocess(text: str, data: dict, context: Optional[List[str]] = None,
             if action:
                 destination = re.split(r"[,;!?]|\b(?:потому\s+что|так\s+как|из-за)\b", t[action.end():], maxsplit=1)[0]
                 own_date = find_date(destination)
-        ev.date = own_date or next((d for c in reversed(ctx_list) if (d := find_date(c))), None)
-        if ev.recurrence and ev.date and ev.date.startswith(("в ", "во ")) and "следующ" not in ev.date:
+        ev.date = own_date or next((d for c in reversed(ctx_list) if context_agrees(c) and (d := find_date(c))), None)
+        if ev.recurrence and ev.date and ev.date.startswith(("в ", "во ")) and "следующ" not in ev.date and not recurrence_start_date(text):
             ev.date = None   # "каждую неделю в пн": день уже в RRULE
     ev.series = ev.intent in ("move", "cancel") and bool(RE_SERIES.search(t) or ev.recurrence)
 
@@ -760,6 +841,20 @@ def fill_datetimes(ev: Event, now: Optional[datetime], tz: str) -> None:
     ev.starts_at = start.isoformat()
     if ev.duration_minutes:
         ev.ends_at = (start + timedelta(minutes=ev.duration_minutes)).isoformat()
+
+
+def past_start_question(ev: Event, now: Optional[datetime] = None,
+                        tz: str = DEFAULT_TZ) -> Optional[str]:
+    if ev.intent != "create" or not ev.starts_at or ev.time_ambiguous or ev.time_options:
+        return None
+    start = datetime.fromisoformat(ev.starts_at)
+    zone = get_zone(ev.timezone) or get_zone(tz) or ZoneInfo(DEFAULT_TZ)
+    current = (now or datetime.now(zone)).astimezone(zone)
+    if start < current:
+        if ev.date == "сегодня":
+            return "%s уже прошло. Имели в виду завтра?" % start.strftime("%H:%M")
+        return "Указанное начало события уже прошло. Уточните дату и время."
+    return None
 
 
 def missing_fields(ev: Event) -> List[str]:
@@ -997,6 +1092,9 @@ def extract_entities(text: str, context: Optional[List[str]] = None,
             if ev.intent == "create" and not ev.location:
                 ev.location = find_place(raw_text)
             miss = missing_fields(ev)
+            past_question = past_start_question(ev, now, tz)
+            if past_question:
+                miss = list(dict.fromkeys(miss + ["future_start"]))
             if ev.intent is None:
                 status = "no_event"
             elif ev.intent == "create" and (miss or ev.time_ambiguous):
@@ -1004,7 +1102,7 @@ def extract_entities(text: str, context: Optional[List[str]] = None,
             else:
                 status = "ok"
             res.update(status=status, event=ev.model_dump() if ev.intent else None,
-                       missing=miss, clarify=clarify_question(ev))
+                       missing=miss, clarify=past_question or clarify_question(ev))
     except Exception as e:
         log.exception("nlp failed")
         res["error"] = type(e).__name__
@@ -1023,6 +1121,8 @@ def to_event_record(result: dict, *, user_id: str, chat_id: Optional[str] = None
     Для move и cancel возвращает None: это записи в operations для существующего события.
     """
     ev = result.get("event")
+    if result.get("status") != "ok":
+        return None
     if not ev or ev.get("intent") != "create":
         return None
     return {
@@ -1172,11 +1272,15 @@ def dialogue_question(ev: Event, target_event_id=None) -> Tuple[List[str], Optio
 
 
 def dialogue_result(ev: Optional[Event], *, tz: str, now: datetime,
-                    target_event_id=None) -> dict:
+                    target_event_id=None, current_time: Optional[datetime] = None) -> dict:
     if ev is None or ev.intent is None:
         return {"status": "no_event", "event": None, "missing": [],
                 "clarify": None, "error": None, "tz": tz}
     missing, question = dialogue_question(ev, target_event_id)
+    past_question = past_start_question(ev, current_time or now, tz)
+    if past_question:
+        missing = list(dict.fromkeys(missing + ["future_start"]))
+        question = past_question
     if ev.date and resolve_date(ev.date, now) is None:
         missing = list(dict.fromkeys(missing + ["date"]))
         question = "Не удалось определить дату. Укажите существующую календарную дату."
@@ -1283,7 +1387,7 @@ def process_dialogue_message(text: str, state: DialogueState, *,
             raise ValueError("Выбор существующего события применим только к move/cancel")
         state.target_event_id = target_event_id
     output = dialogue_result(ev, tz=tz, now=reference,
-                             target_event_id=state.target_event_id)
+                             target_event_id=state.target_event_id, current_time=now)
     output["latency_s"] = round(_time.perf_counter() - started, 3)
     return output
 
@@ -1416,3 +1520,30 @@ def evaluate_nlp_cases(cases, runner=None) -> dict:
                           "precision": ratio(tp, tp + fp), "recall": ratio(tp, tp + fn)},
             "fields": {k: dict(v, accuracy=ratio(v["correct"], v["total"]))
                        for k, v in field_scores.items()}, "records": records}
+
+
+class DialogueSession:
+    """Один экземпляр на один диалог пользователя с ботом.
+
+    Сервис хранит экземпляр между сообщениями и вызывает reset после завершения
+    задачи. Класс не выполняет запись в календарь или базу данных.
+    """
+
+    def __init__(self, timeout_seconds: int = 1800):
+        self._state = DialogueState(timeout_seconds=timeout_seconds)
+
+    def process(self, text: str, *, message_time: Optional[datetime] = None,
+                tz: str = DEFAULT_TZ, target_event_id=None,
+                new_task: bool = False, extractor=None) -> dict:
+        return process_dialogue_message(
+            text=text,
+            state=self._state,
+            message_time=message_time,
+            tz=tz,
+            target_event_id=target_event_id,
+            new_task=new_task,
+            extractor=extractor,
+        )
+
+    def reset(self) -> None:
+        self._state.reset()

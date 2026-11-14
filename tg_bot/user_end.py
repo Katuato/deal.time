@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from datetime import datetime
 from config import bot
 from database.models import add_user, add_consent, get_consent, get_buss_conn, add_buss_conn
-import keyboards as keyb
+import tg_bot.keyboards as keyb
 us = Router()
 def goto_settings_button():
     kb = InlineKeyboardBuilder()

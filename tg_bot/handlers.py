@@ -8,10 +8,10 @@ from zoneinfo import ZoneInfo
 
 from config import bot, logger
 from modules.stt_module import STTProcessor
-from modules.nlp_module import extract_entities_async
-from database.models import get_buss_conn, add_buss_conn
+from modules.nlp_module import process_dialogue_message, DialogueState, DEFAULT_TZ
+from database.models import get_buss_conn, add_buss_conn, get_user
 from calendarr.oauth import build_auth_url
-import keyboards as keyb
+import tg_bot.keyboards as keyb
 
 rt = Router()
 stt = STTProcessor()
@@ -50,6 +50,7 @@ async def google_connect(call: types.CallbackQuery):
 async def new_message(msg: types.Message):
     if msg.chat.type=='private':
         buss_conn = await bot.get_business_connection(msg.business_connection_id)
+        user = await get_user(buss_conn.user.id)
         if msg.voice:
             file_id = msg.voice.file_id
             file_info = await bot.get_file(file_id)
@@ -60,7 +61,7 @@ async def new_message(msg: types.Message):
         else:
             text = msg.text
         print(text)
-        answ = await extract_entities_async(text=text)
+        answ = process_dialogue_message(text=text, message_time=msg.date, tz=user.timezone if user.timezone else DEFAULT_TZ, state=DialogueState)
         print(answ)
         if answ is not None:
             await new_event(answ, user_id=buss_conn.user.id)
