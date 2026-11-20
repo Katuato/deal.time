@@ -1,82 +1,69 @@
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+"""
+Адаптер между результатом modules/nlp_module.py и календарным коннектором.
 
-# Словарь дней недели для RRULE
-DAYS_MAP = {
-    "пн": "MO", "понедельник": "MO", "вт": "TU", "вторник": "TU",
-    "ср": "WE", "среду": "WE", "среда": "WE", "чт": "TH", "четверг": "TH",
-    "пт": "FR", "пятницу": "FR", "пятница": "FR", "сб": "SA", "субботу": "SA",
-    "суббота": "SA", "вс": "SU", "воскресенье": "SU"
-}
+NLP-модуль уже возвращает готовые `starts_at`/`ends_at` (ISO с поясом), `rrule`,
+`duration_minutes` и `timezone`, поэтому здесь никакого собственного разбора
+дат и повторений нет — только маппинг полей.
+"""
+import logging
 
+from calendarr.calendar_queue import create_event_or_enqueue
 
-def parse_recurrence(rec_text: str) -> dict:
-    """Превращает текст Анны ('каждую неделю пн') в словарь для build_rrule."""
-    if not rec_text:
-        return None
-
-    rec_text = rec_text.lower()
-    result = {"freq": "WEEKLY", "interval": 1}
-
-    if "день" in rec_text or "ежедневно" in rec_text:
-        result["freq"] = "DAILY"
-    elif "месяц" in rec_text:
-        result["freq"] = "MONTHLY"
-    elif "год" in rec_text:
-        result["freq"] = "YEARLY"
-
-    for ru_day, en_day in DAYS_MAP.items():
-        if ru_day in rec_text:
-            result["byday"] = [en_day]
-            break
-    return result
+logger = logging.getLogger(__name__)
 
 
-def parse_datetime(nlp_date: str, nlp_time: str, tz_name: str) -> str:
-    """Превращает 'завтра' и '15:00' в '2026-11-15T15:00:00+03:00'."""
-    if not nlp_time:
-        return None
+async def handle_nlp_result(
+    nlp_result: dict,
+    user_id: int,
+    storage,
+    user_tz: str = "Europe/Moscow",
+    *,
+    local_event_id: int | None = None,
+) -> dict:
+    """Превращает результат NLP в событие календаря и создаёт его (с очередью при сбоях сети)."""
+    status = nlp_result.get("status")
 
-    tz = ZoneInfo(tz_name)
-    now = datetime.now(tz)
-    target_date = now.date()
+    if status == "needs_clarification":
+        return {
+            "status": "needs_clarification",
+            "missing": nlp_result.get("missing", []),
+            "question": nlp_result.get("clarify") or nlp_result.get("question"),
+        }
+    if status != "ok":
+        return {"status": "ignored"}
 
-    if nlp_date:
-        nlp_date = nlp_date.lower()
-        if "послезавтра" in nlp_date:
-            target_date = now.date() + timedelta(days=2)
-        elif "завтра" in nlp_date:
-            target_date = now.date() + timedelta(days=1)
+    ev = nlp_result.get("event") or {}
+    intent = ev.get("intent")
+    if intent in ("move", "cancel"):
+        # TODO: перенос/отмена требуют поиска события в БД (events.google_event_id)
+        # и вызова update_event_time/delete_event — пока не реализовано.
+        return {"status": "unsupported", "intent": intent}
+    if intent != "create":
+        return {"status": "ignored"}
 
-    h, m = map(int, nlp_time.split(":"))
-    dt = datetime.combine(target_date, datetime.min.time().replace(hour=h, minute=m))
-    return dt.replace(tzinfo=tz).isoformat()
+    if not ev.get("starts_at"):
+        return {"status": "needs_clarification", "missing": ["starts_at"],
+                "question": nlp_result.get("clarify")}
 
-
-async def handle_nlp_result(nlp_result: dict, user_id: int, storage, user_tz: str = "Europe/Moscow"):
-    """Берет результат Анны, адаптирует и вызывает твой календарь."""
-    if nlp_result.get("status") not in ("ok", "needs_clarification"):
-        return None
-
-    ev = nlp_result.get("event", {})
-    if ev.get("intent") != "create":
-        return None
-
-    # Собираем описание с именами участников (т.к. Google API требует email, а их нет)
+    # Google API требует email, а NLP отдаёт только имена — кладём их в описание
     desc = "Создано ботом ДЕЛУ.ВРЕМЯ"
-    if ev.get('attendees'):
-        desc = f"Участники: {', '.join(ev.get('attendees', []))}\n" + desc
+    if ev.get("attendees"):
+        desc = f"Участники: {', '.join(ev['attendees'])}\n" + desc
 
     event_data = {
         "summary": ev.get("summary") or "Встреча",
+        "start_time": ev["starts_at"],
+        "end_time": ev.get("ends_at"),
+        "duration_minutes": ev.get("duration_minutes"),
         "timezone": ev.get("timezone") or user_tz,
-        "start_time": parse_datetime(ev.get("date"), ev.get("time"), user_tz),
-        "end_time": parse_datetime(ev.get("date"), ev.get("end_time"), user_tz),
-        "recurrence": parse_recurrence(ev.get("recurrence")),
         "description": desc,
-        "attendees": []
+        "attendees": [],
     }
+    if ev.get("location"):
+        event_data["location"] = ev["location"]
+    if ev.get("rrule"):
+        event_data["rrule"] = ev["rrule"]
 
-    # Импорт внутри функции, чтобы избежать циклического импорта
-    from calendar_connector import create_event
-    return await create_event(user_id, storage, event_data)
+    return await create_event_or_enqueue(
+        user_id, storage, event_data, local_event_id=local_event_id
+    )

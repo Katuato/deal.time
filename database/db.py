@@ -10,7 +10,7 @@ DB_URL = (
     f'postgresql+asyncpg://{db_logpass}'
     f'{db_ipport}/deal.time'
 )
-engine = create_async_engine(DB_URL, echo=True)
+engine = create_async_engine(DB_URL, echo=False)
 async_session = async_sessionmaker(bind=engine, expire_on_commit=False)
 SECRET_KEY = f"{secret_key}"
 fernet = Fernet(SECRET_KEY)
@@ -63,14 +63,13 @@ class Event(Base):
     id = Column(Integer, index=True, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.user_id"))
     chat_id = Column(BigInteger)
-    calendar_conn_id = '' #непонятно
     title = Column(String)
     location = Column(String)
     starts_at = Column(DateTime)
     ends_at = Column(DateTime)
-    duration = '' #непонятно 
+    duration = Column(String)
     timezone = Column(String)
-    '''repeating = Column('не знаю что тут за тип') #rrule'''
+    repeating = Column(String) #rrule
     participants = Column(JSON)
     status = Column(String)
     confirmed_at = Column(DateTime)
@@ -78,14 +77,16 @@ class Event(Base):
 class Operation(Base):
     __tablename__ = 'operations'
     id = Column(Integer, index=True, primary_key=True)
-    event_id = Column(BigInteger) #ForeignKey("с чем связано то")
+    event_id = Column(BigInteger)
     action = Column(String)
     data = Column(JSON)
     status = Column(String)
-    attempts = Column(Integer)
+    attempts = Column(Integer, default=0)  
     next_attempt_at = Column(DateTime)
-
-
+    next_attempt_step = Column(JSON, default=lambda: [10, 20, 60])
+"""for i in range(attempts):
+    ffdfdsfsdf
+    await asyncio.sleep(next_attempt_step[i])"""
 
 async def async_main():
     async with engine.begin() as conn:
