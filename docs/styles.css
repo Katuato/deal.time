@@ -19,3 +19,15 @@
 @keyframes screen-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes pop{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}@keyframes float{50%{transform:translateY(-7px) rotate(4deg)}}@media(min-width:600px){.app{box-shadow:0 0 35px #0002}}@media(max-height:760px){.screen{padding-bottom:116px}.onboard-logo{margin-top:13px}.onboard-tag{margin-bottom:25px}.home-agenda{gap:10px}.home-date{margin-bottom:12px}.home-event{min-height:65px}.voice-panel{margin-top:8px}.voice-button{min-height:72px}.tabbar{bottom:35px}.footer-help{bottom:7px}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
 .app{height:100dvh;min-height:560px;overflow:hidden}.screen{height:calc(100dvh - 166px);min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}.screen::-webkit-scrollbar{display:none}.onboarding{height:100%}.onboarding .screen{height:calc(100dvh - 65px)}.voice-button svg{width:47px;height:47px;flex:none}.onboarding .footer-help{bottom:13px}
 .logo,.onboard-logo{mix-blend-mode:normal}.app.dark .title-pill,.app.dark .heading-icon{background:#203d49;color:#dcfaff}.app.dark .logo{filter:brightness(1.25)}
+
+
+.quick-icon{width:22px;height:22px;color:var(--turquoise)}
+.filter-popover-expanded{width:218px;padding:12px;top:0;right:42px}
+.filter-popover-expanded label{font-size:12px;margin-top:9px;color:var(--blue)}
+.filter-popover-expanded input,.filter-popover-expanded select{display:block;width:100%;height:32px;margin-top:5px;padding:4px 7px;border:1px solid var(--turquoise);border-radius:9px;background:#fff;color:var(--blue);font-size:12px}
+.filter-reset{margin-top:10px;border:0;background:#d8f4fa;color:var(--blue);border-radius:12px;padding:7px 12px;font-size:12px;font-weight:700}
+.revoke-button{margin-left:auto;border:1px solid var(--coral);background:#fff5f3;color:#b54640;border-radius:13px;padding:5px 8px;font:700 11px Comfortaa,'Trebuchet MS',sans-serif}
+.revoke-button:hover{background:#ffe5df}
+.access-mark{margin-left:auto;color:#df7471;font-size:16px;padding-right:8px}
+.btn:disabled{opacity:.55;cursor:not-allowed;box-shadow:none;transform:none}
+.app.dark .filter-popover-expanded input,.app.dark .filter-popover-expanded select,.app.dark .revoke-button{background:#18313c;color:#dffaff}
