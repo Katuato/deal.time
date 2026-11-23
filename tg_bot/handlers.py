@@ -1,25 +1,24 @@
 import asyncio
-import logging
 import os
 from aiogram import Router, types, F
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from dateparser.search import search_dates
 from zoneinfo import ZoneInfo
 import html
 from datetime import datetime
 
 from config import bot, logger
 from modules.stt_module import STTProcessor
-from modules.nlp_module import (process_dialogue_message, DialogueState, DEFAULT_TZ, normalize_text,
-                                 find_times, find_bare_hours, guess_hour, find_date, resolve_date,
-                                 Event as NlpEvent, fill_datetimes)
+from modules.nlp_module import (process_dialogue_message, DialogueState, DEFAULT_TZ, resolve_date,
+                                 merge_clarification, get_zone, Event as NlpEvent, fill_datetimes,
+                                 to_event_record)
 
 dialogue_states: dict[tuple[int, int], DialogueState] = {}
 from database.models import get_buss_conn, add_buss_conn, get_user, add_event, update_event, get_event
 from calendarr.oauth import build_auth_url
 from calendarr.calendar_queue import create_event_or_enqueue
+from calendarr.nlp_adapter import build_event_data
 from calendarr.storage import DBTokenStorage
 import tg_bot.keyboards as keyb
 
@@ -180,50 +179,47 @@ def _event_kb(event_id: int):
 
 
 def _parse_new_time(text: str, ev) -> datetime | None:
-    """Разбирает «завтра в 15:00», «в пятницу в 10», «25.11 18:30», «в 7 вечера» теми же правилами,
-    что и NLP-модуль. Без даты день остаётся прежним. Возвращает время без пояса (в поясе события)."""
-    zone = ZoneInfo(ev.timezone or DEFAULT_TZ)
-    now = datetime.now(zone)
-    text = normalize_text(text)
+    """Разбирает «завтра в 15:00», «в пятницу в 10», «25.11 18:30», «в 7 вечера» через NLP-модуль
+    (merge_clarification). Без даты день остаётся прежним. Возвращает время без пояса (в поясе события)."""
+    tz = ev.timezone or DEFAULT_TZ
+    now = datetime.now(get_zone(tz) or ZoneInfo(DEFAULT_TZ))
+    draft = merge_clarification(NlpEvent(intent="create"), text, now, tz)
 
-    phrase = find_date(text)
-    times = find_times(text)
-    bare = find_bare_hours(text)
-    if times:
-        hour, minute = int(times[0][1][:2]), int(times[0][1][3:])
-    elif bare:
-        hhmm = guess_hour(bare[0][1], text)
-        hour, minute = int(hhmm[:2]), int(hhmm[3:])
-    elif phrase and ev.starts_at:  # «послезавтра» — меняем только день, время прежнее
-        hour, minute = ev.starts_at.hour, ev.starts_at.minute
-    else:
-        return None
+    # «в 5» NLP помечает неоднозначным (05:00/17:00) — берём его основной вариант, как при создании
+    hhmm = draft.time or (draft.time_options[0] if draft.time_options else None)
+    if hhmm is None:
+        if not (draft.date and ev.starts_at):
+            return None
+        hhmm = ev.starts_at.strftime("%H:%M")  # «послезавтра» — меняем только день, время прежнее
 
-    if phrase:
-        day = resolve_date(phrase, now)
+    if draft.date:
+        day = resolve_date(draft.date, now)
         if day is None:
             return None
     else:
         day = ev.starts_at or now
-    return datetime(day.year, day.month, day.day, hour, minute)
+    return datetime(day.year, day.month, day.day, int(hhmm[:2]), int(hhmm[3:]))
 
 
 async def new_event(answ, user_id, chat_id, user_tz, msg_from=None, msg_to=None):
-    ev = answ.get("event") or {}
-    tz = ev.get("timezone") or user_tz
+    rec = to_event_record(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
+    if rec is None:  # не create или статус не ok — сюда не должно попадать
+        logger.warning("new_event: NLP-результат не подходит для создания события")
+        return
+    # колонки БД: время без пояса, длительность — строка с минутами, статус до подтверждения — waiting
     event_id = await add_event(
-        user_id=user_id, chat_id=chat_id, title=ev.get("summary"),
-        starts_at=_to_naive(ev.get("starts_at")), ends_at=_to_naive(ev.get("ends_at")),
-        duration=str(ev["duration_minutes"]) if ev.get("duration_minutes") else None,
-        timezone=tz, location=ev.get("location"),
-        participants=[{"name": n} for n in ev.get("attendees") or []] or None,
+        user_id=user_id, chat_id=chat_id, title=rec["title"],
+        starts_at=_to_naive(rec["starts_at"]), ends_at=_to_naive(rec["ends_at"]),
+        duration=str(int(rec["duration"].total_seconds() // 60)) if rec["duration"] else None,
+        timezone=rec["timezone"], location=rec["location"],
+        participants=rec["participants"] or None,
         status="waiting",
     )
     if event_id is None:
         await bot.send_message(chat_id=user_id, text="Не удалось сохранить новое событие. Попробуйте позже.")
         return
-    if ev.get("rrule"):
-        pending_rrules[event_id] = ev["rrule"]
+    if rec["rrule"]:
+        pending_rrules[event_id] = rec["rrule"]
 
     saved = await get_event(event_id)
     lines = ['Обнаружено новое событие:', *_event_card(saved)]
@@ -246,20 +242,16 @@ async def _add_to_calendar(call: types.CallbackQuery, ev):
         await call.answer()
         return
 
-    event_data = {
-        "summary": ev.title or "Встреча",
-        "start_time": ev.starts_at.isoformat(),
-        "end_time": ev.ends_at.isoformat() if ev.ends_at else None,
-        "duration_minutes": int(ev.duration) if ev.duration and ev.duration.isdigit() else None,
-        "timezone": ev.timezone or DEFAULT_TZ,
-        "attendees": [],  # Google нужен email, а у нас только имена — пишем их в описание
-    }
-    names = [p.get("name") for p in ev.participants or [] if p.get("name")]
-    event_data["description"] = (f"Участники: {', '.join(names)}\n" if names else "") + "Создано ботом ДЕЛУ.ВРЕМЯ"
-    if ev.location:
-        event_data["location"] = ev.location
-    if ev.id in pending_rrules:
-        event_data["rrule"] = pending_rrules[ev.id]
+    event_data = build_event_data(
+        summary=ev.title,
+        start_time=ev.starts_at.isoformat(),
+        end_time=ev.ends_at.isoformat() if ev.ends_at else None,
+        duration_minutes=int(ev.duration) if ev.duration and ev.duration.isdigit() else None,
+        timezone=ev.timezone or DEFAULT_TZ,
+        attendees=[p.get("name") for p in ev.participants or [] if p.get("name")],
+        location=ev.location,
+        rrule=pending_rrules.get(ev.id),
+    )
 
     await call.answer("Добавляю в календарь…")
     result = await create_event_or_enqueue(ev.user_id, DBTokenStorage(), event_data, local_event_id=ev.id)
@@ -317,15 +309,12 @@ async def action_event(call: types.CallbackQuery, state: FSMContext):
                 return
             field = action.removeprefix("edit_")
             await state.set_state(EditEvent.waiting_value)
-            # запоминаем сообщение-подсказку с «Отмена», чтобы убрать его после правки
             await state.update_data(event_id=event_id, field=field, cleanup=[call.message.message_id])
             kb = InlineKeyboardBuilder()
             kb.button(text="↩️ Отмена", callback_data=f"ev:show:{event_id}")
             await call.message.edit_text(EDIT_PROMPTS[field], reply_markup=kb.as_markup())
             await call.answer()
         case "show":
-            # «Отмена»: подсказка превращается обратно в карточку, а сообщения
-            # «Не понял время…» от неудачных попыток удаляем
             extra = [m for m in (await state.get_data()).get("cleanup", []) if m != call.message.message_id]
             await state.clear()
             await _delete_messages(call.message.chat.id, extra)
@@ -352,10 +341,10 @@ async def _delete_messages(chat_id: int, message_ids: list[int]) -> None:
     for message_id in message_ids:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             try:
                 await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
 
