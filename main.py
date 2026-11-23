@@ -15,6 +15,7 @@ from calendarr.storage import DBTokenStorage
 from config import bot
 from database.db import check_database, engine, get_token_cipher
 from logging_setup import LoggingContextMiddleware, setup_logging
+from tg_bot.commands import cm, setup_bot_menu
 from tg_bot.handlers import initialize_stt, notify_queue_result, rt
 from tg_bot.settings import router as settings_router
 from tg_bot.user_end import us
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 dp.update.outer_middleware(LoggingContextMiddleware())
+dp.include_router(cm)  # /help и /history первыми: работают в любом состоянии диалога
 dp.include_router(settings_router)
 dp.include_router(rt)
 dp.include_router(us)
@@ -50,6 +52,8 @@ async def main():
             get_token_cipher()
             await check_database()
             await initialize_stt()
+            await setup_bot_menu()
+            await setup_bot_menu()
 
             worker = asyncio.create_task(run_worker(DBTokenStorage(), on_result=notify_queue_result),
                                          name="calendar worker")
