@@ -1,0 +1,44 @@
+x-runtime: &runtime
+  image: ${DEAL_TIME_IMAGE:-deal-time:local}
+  platform: linux/amd64
+  env_file: ${DEAL_TIME_ENV_FILE:-.env}
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp
+
+services:
+  bot:
+    <<: *runtime
+    build: .
+    environment:
+      OAUTH_HOST: 0.0.0.0
+      OAUTH_PORT: '8080'
+      LOG_TO_FILES: '0'
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    volumes:
+      - model_cache:/home/app/.cache/huggingface
+    healthcheck:
+      test: [CMD, python, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/healthz', timeout=3).close()"]
+      start_period: 5m
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  migrate:
+    <<: *runtime
+    profiles: [tools]
+    command: [python, -m, alembic, upgrade, head]
+
+volumes:
+  model_cache:

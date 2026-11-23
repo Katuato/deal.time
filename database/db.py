@@ -1,20 +1,52 @@
-import base64
+import os
+from functools import lru_cache
+
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
-from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON
-from config import db_logpass, db_ipport, secret_key
-print(5//2)
-DB_URL = (
-    f'postgresql+asyncpg://{db_logpass}'
-    f'{db_ipport}/deal.time'
-)
-engine = create_async_engine(DB_URL, echo=False)
+from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON, Index
+
+load_dotenv()
+
+
+def get_database_url() -> URL:
+    value = os.getenv("DATABASE_URL")
+    if not value:
+        credentials = os.getenv("db_logpass")
+        host = os.getenv("db_ipport")
+        if not credentials or not host:
+            raise RuntimeError("Задайте DATABASE_URL или db_logpass и db_ipport")
+        value = f"postgresql+asyncpg://{credentials}{host}/deal.time"
+
+    try:
+        url = make_url(value)
+    except (ArgumentError, ValueError):
+        raise RuntimeError("Некорректный адрес PostgreSQL") from None
+    if url.drivername in {"postgres", "postgresql"}:
+        return url.set(drivername="postgresql+asyncpg")
+    if url.drivername != "postgresql+asyncpg":
+        raise RuntimeError("Для DATABASE_URL требуется PostgreSQL с драйвером asyncpg")
+    return url
+
+
+engine = create_async_engine(get_database_url(), pool_pre_ping=True, hide_parameters=True)
 async_session = async_sessionmaker(bind=engine, expire_on_commit=False)
-SECRET_KEY = f"{secret_key}"
-fernet = Fernet(SECRET_KEY)
-session = async_session()
+
+
+@lru_cache(maxsize=1)
+def get_token_cipher() -> Fernet:
+    key = os.getenv("secret_key")
+    if not key:
+        raise RuntimeError("Задайте secret_key для шифрования токенов")
+    try:
+        return Fernet(key)
+    except ValueError:
+        raise RuntimeError("Некорректный ключ шифрования токенов") from None
+
 
 class EncryptedString(sa.TypeDecorator):
     impl = sa.Text
@@ -22,12 +54,12 @@ class EncryptedString(sa.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            return fernet.encrypt(value.encode('utf-8')).decode('utf-8')
+            return get_token_cipher().encrypt(value.encode('utf-8')).decode('utf-8')
         return value
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            return fernet.decrypt(value.encode('utf-8')).decode('utf-8')
+            return get_token_cipher().decrypt(value.encode('utf-8')).decode('utf-8')
         return value
     
 class Base(AsyncAttrs, DeclarativeBase):
@@ -76,18 +108,28 @@ class Event(Base):
     google_event_id = Column(String)
 class Operation(Base):
     __tablename__ = 'operations'
+    __table_args__ = (
+        Index(
+            "ix_operations_due", "next_attempt_at", "id",
+            postgresql_where=sa.text("status IN ('pending', 'processing')"),
+        ),
+        Index("ix_operations_event_action_status", "event_id", "action", "status"),
+    )
     id = Column(Integer, index=True, primary_key=True)
     event_id = Column(BigInteger)
     action = Column(String)
     data = Column(JSON)
     status = Column(String)
-    attempts = Column(Integer, default=0)  
+    attempts = Column(Integer, default=0)
     next_attempt_at = Column(DateTime)
     next_attempt_step = Column(JSON, default=lambda: [10, 20, 60])
-"""for i in range(attempts):
-    ffdfdsfsdf
-    await asyncio.sleep(next_attempt_step[i])"""
 
-async def async_main():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+
+async def check_database() -> None:
+    async with engine.connect() as connection:
+        revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version LIMIT 1"))
+        if revision is None:
+            raise RuntimeError("Выполните миграции базы данных")
+        await connection.execute(sa.select(Operation.id, Event.id).select_from(
+            Operation.__table__.join(Event, Operation.event_id == Event.id)
+        ).limit(0))

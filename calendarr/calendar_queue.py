@@ -2,20 +2,22 @@
 Реализация NF-08 через таблицу `operations`.
 
 Формат payload (Operation.data):
-    create: {"user_id", "event_data"}
+    create: {"user_id", "event_data", "google_event_id" (для подтверждённых событий)}
     update: {"user_id", "google_event_id", "new_start_time", "new_end_time", "timezone"}
     delete: {"user_id", "google_event_id"}
 Operation.event_id — локальный events.id (необязателен); Google ID лежит в payload
 или берётся из events.google_event_id.
 
 Воркер запускается через run_worker() (см. main.py). Строки забираются через
-claim_due_operations (FOR UPDATE SKIP LOCKED + lease), так что несколько воркеров
-не обработают одну операцию дважды.
+claim_due_operations (FOR UPDATE SKIP LOCKED + lease). После истечения lease
+повтор использует сохранённый Google ID; завершить операцию может текущий воркер.
 """
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import or_, select
 
@@ -48,6 +50,20 @@ async def _connector():
     return calendar_connector
 
 
+def _new_operation(
+    user_id: int, action: str, payload: dict[str, Any],
+    event_id: int | None, delay_seconds: int = 0,
+) -> Operation:
+    return Operation(
+        event_id=event_id,
+        action=action,
+        data={**payload, "user_id": user_id},
+        status=STATUS_PENDING,
+        attempts=0,
+        next_attempt_at=_utcnow() + timedelta(seconds=delay_seconds),
+    )
+
+
 async def enqueue_operation(
     user_id: int,
     action: str,
@@ -57,22 +73,42 @@ async def enqueue_operation(
     delay_seconds: int = 0,
 ) -> int:
     """action ∈ {'create','update','delete'}; payload см. в docstring модуля."""
-    data = {"user_id": user_id, **payload}
-    next_at = _utcnow() + timedelta(seconds=delay_seconds)
-    async with async_session() as session:
-        op = Operation(
-            event_id=event_id,
-            action=action,
-            data=data,
-            status=STATUS_PENDING,
-            attempts=0,
-            next_attempt_at=next_at,
-        )
+    async with async_session.begin() as session:
+        op = _new_operation(user_id, action, payload, event_id, delay_seconds)
         session.add(op)
-        await session.commit()
-        await session.refresh(op)
-        logger.info("В очередь поставлена операция id=%s action=%s", op.id, action)
-        return op.id
+        await session.flush()
+        op_id = op.id
+    logger.info("В очередь поставлена операция id=%s", op_id)
+    return op_id
+
+
+async def confirm_event_and_enqueue(
+    user_id: int,
+    event_id: int,
+    build_event_data: Callable[[Event], dict[str, Any]],
+) -> int | None:
+    """Подтверждает событие владельца и сохраняет операцию до обращения к Google."""
+    async with async_session.begin() as session:
+        event = await session.scalar(
+            select(Event)
+            .where(Event.id == event_id, Event.user_id == user_id, Event.status == "waiting")
+            .with_for_update()
+        )
+        if event is None:
+            return None
+
+        payload = {
+            "event_data": build_event_data(event),
+            "google_event_id": uuid4().hex,
+        }
+        event.status = "queued"
+        event.confirmed_at = _utcnow()
+        operation = _new_operation(user_id, "create", payload, event_id)
+        session.add(operation)
+        await session.flush()
+        op_id = operation.id
+    logger.info("Подтверждение события сохранено, операция id=%s", op_id)
+    return op_id
 
 
 async def claim_due_operations(limit: int = 10) -> list[Operation]:
@@ -98,18 +134,38 @@ async def claim_due_operations(limit: int = 10) -> list[Operation]:
         return list(rows)
 
 
-async def _finish(op_id: int, status: str, *, attempts: int | None = None,
-                  retry_in: float | None = None, count_attempt: bool = False) -> None:
-    async with async_session() as session:
-        op = await session.get(Operation, op_id)
-        if not op:
-            return
+async def _finish(op_id: int, status: str, *, lease_until: datetime | None = None,
+                  retry_in: float | None = None, count_attempt: bool = False,
+                  google_id: str | None = None) -> bool:
+    async with async_session.begin() as session:
+        op = await session.get(Operation, op_id, with_for_update=True)
+        if op is None:
+            return False
+        if lease_until is not None and (
+            op.status != STATUS_PROCESSING or op.next_attempt_at != lease_until
+        ):
+            return False
         if count_attempt:
             op.attempts = (op.attempts or 0) + 1
         op.status = status
         if retry_in is not None:
             op.next_attempt_at = _utcnow() + timedelta(seconds=retry_in)
-        await session.commit()
+
+        if op.action == "create" and op.event_id is not None and status in (STATUS_DONE, STATUS_FAILED):
+            payload = op.data if isinstance(op.data, dict) else {}
+            user_id = payload.get("user_id")
+            if type(user_id) is not int:
+                return True
+            event = await session.scalar(
+                select(Event).where(Event.id == op.event_id, Event.user_id == user_id)
+                .with_for_update()
+            )
+            if event is not None:
+                if status == STATUS_DONE and google_id:
+                    event.google_event_id = google_id
+                if payload.get("google_event_id") and event.status == "queued":
+                    event.status = "confirmed" if status == STATUS_DONE else "failed"
+    return True
 
 
 async def mark_operation_done(op_id: int) -> None:
@@ -120,19 +176,24 @@ async def mark_operation_failed(op_id: int) -> None:
     await _finish(op_id, STATUS_FAILED)
 
 
-async def _retry_later(op_id: int, attempts_before: int) -> bool:
-    """Откладывает с backoff, считая попытку. True — ушла в retry, False — исчерпаны попытки."""
+async def _retry_later(op: Operation) -> str | None:
+    """Откладывает с backoff или завершает операцию после последней попытки."""
+    attempts_before = op.attempts or 0
     attempts = attempts_before + 1
     if attempts >= MAX_ATTEMPTS:
-        logger.error("Operation id=%s исчерпала %s попыток — failed", op_id, MAX_ATTEMPTS)
-        await _finish(op_id, STATUS_FAILED, count_attempt=True)
-        return False
-    await _finish(op_id, STATUS_PENDING, retry_in=_backoff(attempts_before), count_attempt=True)
-    return True
+        if await _finish(op.id, STATUS_FAILED, lease_until=op.next_attempt_at, count_attempt=True):
+            logger.error("Operation id=%s исчерпала %s попыток", op.id, MAX_ATTEMPTS)
+            return "failed"
+        return None
+    if await _finish(op.id, STATUS_PENDING, lease_until=op.next_attempt_at,
+                     retry_in=_backoff(attempts_before), count_attempt=True):
+        return "retry"
+    return None
 
 
-async def _postpone(op_id: int) -> None:
-    await _finish(op_id, STATUS_PENDING, retry_in=POSTPONE_SECONDS)
+async def _postpone(op: Operation) -> bool:
+    return await _finish(op.id, STATUS_PENDING, lease_until=op.next_attempt_at,
+                         retry_in=POSTPONE_SECONDS)
 
 
 async def _create_pending_before(op: Operation) -> bool:
@@ -153,16 +214,18 @@ async def _create_pending_before(op: Operation) -> bool:
     return found is not None
 
 
-async def _lookup_google_id(event_id: int) -> str | None:
+async def _lookup_google_id(user_id: int, event_id: int) -> str | None:
     async with async_session() as session:
         return (
-            await session.execute(select(Event.google_event_id).where(Event.id == event_id))
+            await session.execute(
+                select(Event.google_event_id).where(Event.id == event_id, Event.user_id == user_id)
+            )
         ).scalar_one_or_none()
 
 
-async def _save_google_id(event_id: int, google_id: str) -> None:
+async def _save_google_id(user_id: int, event_id: int, google_id: str) -> None:
     async with async_session() as session:
-        ev = await session.get(Event, event_id)
+        ev = await session.scalar(select(Event).where(Event.id == event_id, Event.user_id == user_id))
         if ev:
             ev.google_event_id = google_id
             await session.commit()
@@ -176,32 +239,31 @@ async def process_pending_calendar_operations(storage, limit: int = 10) -> dict[
     for op in await claim_due_operations(limit=limit):
         stats["processed"] += 1
         op_id, action, local_id = op.id, op.action, op.event_id
-        attempts = op.attempts or 0
         payload = op.data or {}
 
         # порядок: update/delete не должны опережать create того же события
         if action in ("update", "delete") and await _create_pending_before(op):
-            await _postpone(op_id)
-            stats["postponed"] += 1
+            stats["postponed"] += await _postpone(op)
             continue
 
         # чтение payload: ошибки структуры не лечатся повтором
         try:
             user_id = payload["user_id"]
-            if not user_id:
-                raise ValueError("пустой user_id")
+            if type(user_id) is not int or not user_id:
+                raise ValueError("некорректный user_id")
             if action == "create":
                 event_data = payload["event_data"]
                 if not isinstance(event_data, dict):
                     raise TypeError("event_data не dict")
+                if payload.get("google_event_id"):
+                    event_data = {**event_data, "google_event_id": payload["google_event_id"]}
             elif action in ("update", "delete"):
                 google_id = payload.get("google_event_id")
                 if not google_id and local_id is not None:
-                    google_id = await _lookup_google_id(local_id)
+                    google_id = await _lookup_google_id(user_id, local_id)
                 if not google_id:
                     if await _has_pending_create(local_id):
-                        await _postpone(op_id)
-                        stats["postponed"] += 1
+                        stats["postponed"] += await _postpone(op)
                         continue
                     raise ValueError("нет google_event_id")
                 if action == "update":
@@ -209,10 +271,9 @@ async def process_pending_calendar_operations(storage, limit: int = 10) -> dict[
                     tz_name = payload.get("timezone", "Europe/Moscow")
             else:
                 raise ValueError(f"неизвестный action={action}")
-        except (KeyError, ValueError, TypeError) as err:
-            logger.error("Operation id=%s: некорректный payload (%s) — failed", op_id, err)
-            await mark_operation_failed(op_id)
-            stats["failed"] += 1
+        except (KeyError, ValueError, TypeError):
+            logger.error("Operation id=%s: некорректный payload", op_id)
+            stats["failed"] += await _finish(op_id, STATUS_FAILED, lease_until=op.next_attempt_at)
             continue
 
         try:
@@ -225,26 +286,23 @@ async def process_pending_calendar_operations(storage, limit: int = 10) -> dict[
             else:
                 result = await connector.delete_event(user_id, storage, google_id)
         except Exception as err:  # noqa: BLE001
-            logger.exception("Исключение при обработке operation id=%s: %s", op_id, err)
-            ok = await _retry_later(op_id, attempts)
-            stats["retry" if ok else "failed"] += 1
+            logger.error("Ошибка обработки operation id=%s (%s)", op_id, type(err).__name__)
+            outcome = await _retry_later(op)
+            if outcome:
+                stats[outcome] += 1
             continue
 
         if result.get("status") == "success":
-            if action == "create" and local_id is not None and result.get("event_id"):
-                try:
-                    await _save_google_id(local_id, result["event_id"])
-                except Exception:  # noqa: BLE001
-                    logger.exception("Не удалось сохранить google_event_id для events.id=%s", local_id)
-            await mark_operation_done(op_id)
-            stats["success"] += 1
+            google_id = result.get("event_id") or payload.get("google_event_id")
+            stats["success"] += await _finish(op_id, STATUS_DONE, lease_until=op.next_attempt_at,
+                                             google_id=google_id)
         elif result.get("need_queue"):
-            ok = await _retry_later(op_id, attempts)
-            stats["retry" if ok else "failed"] += 1
+            outcome = await _retry_later(op)
+            if outcome:
+                stats[outcome] += 1
         else:
-            logger.error("Operation id=%s: окончательная ошибка %s", op_id, result.get("error_type"))
-            await mark_operation_failed(op_id)
-            stats["failed"] += 1
+            logger.error("Operation id=%s: окончательная ошибка Google Calendar", op_id)
+            stats["failed"] += await _finish(op_id, STATUS_FAILED, lease_until=op.next_attempt_at)
 
     return stats
 
@@ -283,9 +341,9 @@ async def create_event_or_enqueue(
         return {**result, "queued": True, "operation_id": op_id}
     if result.get("status") == "success" and local_event_id is not None and result.get("event_id"):
         try:
-            await _save_google_id(local_event_id, result["event_id"])
-        except Exception:  # noqa: BLE001
-            logger.exception("Не удалось сохранить google_event_id для events.id=%s", local_event_id)
+            await _save_google_id(user_id, local_event_id, result["event_id"])
+        except Exception as err:  # noqa: BLE001
+            logger.error("Не удалось сохранить Google ID events.id=%s (%s)", local_event_id, type(err).__name__)
     return result
 
 
@@ -300,8 +358,8 @@ async def run_worker(storage, interval_seconds: float = 30.0) -> None:
                     logger.info("Очередь календаря: %s", stats)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001
-                logger.exception("Ошибка итерации воркера очереди календаря")
+            except Exception as err:  # noqa: BLE001
+                logger.error("Ошибка итерации воркера очереди календаря (%s)", type(err).__name__)
             await asyncio.sleep(interval_seconds)
     except asyncio.CancelledError:
         logger.info("Воркер очереди календаря остановлен")

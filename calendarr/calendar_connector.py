@@ -17,6 +17,7 @@
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -73,7 +74,7 @@ def _execute_request(request_callable) -> dict[str, Any] | None:
         return request_callable.execute()
     except NETWORK_EXCEPTIONS as err:
         if _is_retryable_error(err):
-            logger.warning("Временный сбой Google API (%s), повторная попытка...", err)
+            logger.warning("Временный сбой Google API (%s), повторная попытка", type(err).__name__)
         raise
 
 
@@ -96,7 +97,7 @@ async def get_calendar_service(user_id: int, token_storage: TokenStorageProtocol
     try:
         creds = Credentials.from_authorized_user_info(token_data, SCOPES)
     except (ValueError, TypeError, KeyError) as err:
-        logger.error("Повреждённый формат токена в БД у user_id=%s: %s", user_id, err)
+        logger.error("Повреждённый формат токена в БД у user_id=%s", user_id)
         raise CalendarAuthError(
             "Некорректный формат токена в БД. Требуется повторная авторизация."
         ) from err
@@ -108,7 +109,7 @@ async def get_calendar_service(user_id: int, token_storage: TokenStorageProtocol
                 await asyncio.to_thread(_refresh_credentials, creds)
                 await token_storage.save_user_token(user_id, json.loads(creds.to_json()))
             except RefreshError as err:
-                logger.error("Токен отозван/устарел у user_id=%s: %s", user_id, err)
+                logger.error("Токен отозван или устарел у user_id=%s", user_id)
                 raise CalendarAuthError(
                     "Токен доступа отозван или устарел. Требуется повторный вход."
                 ) from err
@@ -136,7 +137,7 @@ def _validate_time_range(start: str, end: str) -> None:
         start_dt = datetime.fromisoformat(str(start))
         end_dt = datetime.fromisoformat(str(end))
     except ValueError as err:
-        raise ValueError(f"Некорректный формат даты/времени: {err}") from err
+        raise ValueError("Некорректный формат даты или времени") from err
     start_aware = start_dt.tzinfo is not None
     end_aware = end_dt.tzinfo is not None
     if start_aware != end_aware:
@@ -155,7 +156,7 @@ def _resolve_rrule(event_data: dict[str, Any], timezone: str) -> str | None:
         if not rule.upper().startswith("RRULE:"):
             rule = "RRULE:" + rule
         if "FREQ=" not in rule.upper():
-            raise ValueError(f"Некорректный RRULE (нет FREQ=): {raw!r}")
+            raise ValueError("В правиле повторения отсутствует FREQ")
         return rule
     rec = event_data.get("recurrence")
     if rec:
@@ -175,6 +176,12 @@ def _build_idempotent_event_id(user_id: int, event_data: dict[str, Any]) -> str:
     Детерминированный UUIDv5 в hex (Google допускает в id только base32hex: a-v, 0-9).
     Повторная отправка того же события даст 409 — трактуем как «уже создано».
     """
+    if "google_event_id" in event_data:
+        value = event_data["google_event_id"]
+        if not isinstance(value, str) or not re.fullmatch(r"[a-v0-9]{5,1024}", value):
+            raise ValueError("Некорректный идентификатор события Google Calendar")
+        return value
+
     if event_data.get("rrule"):
         rec_key = str(event_data["rrule"]).strip()
     elif event_data.get("recurrence"):
@@ -207,9 +214,11 @@ def _error_result(error_type: str, message: str, need_queue: bool) -> dict[str, 
 
 def _api_error_result(api_err: BaseException, context: str) -> dict[str, Any]:
     is_unavailable = _is_retryable_error(api_err)
-    logger.error("Сбой Google API %s: %s", context, api_err)
+    detail = api_err.resp.status if isinstance(api_err, HttpError) else type(api_err).__name__
+    logger.error("Сбой Google API %s (%s)", context, detail)
+    message = "Google Calendar временно недоступен" if is_unavailable else "Ошибка Google Calendar"
     return _error_result(
-        "api_unavailable" if is_unavailable else "api_error", str(api_err), is_unavailable
+        "api_unavailable" if is_unavailable else "api_error", message, is_unavailable
     )
 
 
@@ -230,7 +239,6 @@ async def create_event(
                 start_dt = datetime.fromisoformat(str(event_data["start_time"]))
                 duration = int(event_data.get("duration_minutes") or 60)
                 event_data["end_time"] = (start_dt + timedelta(minutes=duration)).isoformat()
-                logger.info("end_time не передан. Автоматически установлено: %s", event_data["end_time"])
             except (ValueError, TypeError):
                 pass  # Если формат кривой, пусть падает на валидации ниже
 
@@ -238,11 +246,12 @@ async def create_event(
         _validate_time_range(event_data["start_time"], event_data["end_time"])
         timezone = event_data.get("timezone") or DEFAULT_TIMEZONE
         rrule_string = _resolve_rrule(event_data, timezone)
+        event_id = _build_idempotent_event_id(user_id, event_data)
 
         service = await get_calendar_service(user_id=user_id, token_storage=token_storage)
 
         event_body: dict[str, Any] = {
-            "id": _build_idempotent_event_id(user_id, event_data),
+            "id": event_id,
             "summary": str(event_data["summary"]).strip(),
             "description": event_data.get("description", "Создано ботом ДЕЛУ.ВРЕМЯ"),
             "start": {"dateTime": event_data["start_time"], "timeZone": timezone},
@@ -256,16 +265,14 @@ async def create_event(
             ]
         if rrule_string:
             event_body["recurrence"] = [rrule_string]
-            logger.info("RRULE для user_id=%s: %s", user_id, rrule_string)
 
-        logger.info("Создание события '%s' (user_id=%s)", event_body["summary"], user_id)
         try:
             req = service.events().insert(calendarId=PRIMARY_CALENDAR_ID, body=event_body)
             created = await asyncio.to_thread(_execute_request, req) or {}
         except HttpError as api_err:
             if api_err.resp.status != 409:
                 raise
-            return await _handle_conflict(service, user_id, event_body)
+            return await _handle_conflict(service, event_body)
 
         return {
             "status": "success",
@@ -277,18 +284,18 @@ async def create_event(
     except CalendarAuthError as err:
         return _error_result("auth_error", str(err), False)
     except ValueError as err:
-        logger.error("Ошибка валидации при создании: %s", err)
+        logger.error("Ошибка валидации при создании события")
         return _error_result("validation_error", str(err), False)
     except NETWORK_EXCEPTIONS as api_err:
-        return _api_error_result(api_err, f"при создании user_id={user_id}")
+        return _api_error_result(api_err, "при создании события")
     except Exception as err:  # noqa: BLE001
-        logger.exception("Внутренняя ошибка при создании события user_id=%s", user_id)
-        return _error_result("internal_error", str(err), True)
+        logger.error("Внутренняя ошибка при создании события (%s)", type(err).__name__)
+        return _error_result("internal_error", "Внутренняя ошибка создания события", True)
     finally:
         await _close_service(service)
 
 
-async def _handle_conflict(service, user_id: int, event_body: dict[str, Any]) -> dict[str, Any]:
+async def _handle_conflict(service, event_body: dict[str, Any]) -> dict[str, Any]:
     """
     409 на insert: id уже занят. Удалённое событие в Google хранится со status=cancelled
     и остаётся невидимым — тогда восстанавливаем его через update.
@@ -297,7 +304,6 @@ async def _handle_conflict(service, user_id: int, event_body: dict[str, Any]) ->
     get_req = service.events().get(calendarId=PRIMARY_CALENDAR_ID, eventId=event_id)
     existing = await asyncio.to_thread(_execute_request, get_req) or {}
     if existing.get("status") == "cancelled":
-        logger.info("Событие %s было удалено ранее — восстанавливаем, user_id=%s", event_id, user_id)
         restore_body = {**event_body, "status": "confirmed"}
         upd_req = service.events().update(
             calendarId=PRIMARY_CALENDAR_ID, eventId=event_id, body=restore_body
@@ -309,7 +315,6 @@ async def _handle_conflict(service, user_id: int, event_body: dict[str, Any]) ->
             "html_link": restored.get("htmlLink"),
             "duplicate": False,
         }
-    logger.info("Событие уже создано (idempotent duplicate), user_id=%s", user_id)
     return {
         "status": "success",
         "event_id": existing.get("id") or event_id,
@@ -342,19 +347,18 @@ async def update_event_time(
             calendarId=PRIMARY_CALENDAR_ID, eventId=event_id, body=patch_body
         )
         updated = await asyncio.to_thread(_execute_request, req) or {}
-        logger.info("Время события %s обновлено", event_id)
         return {"status": "success", "event_id": updated.get("id") or event_id}
 
     except CalendarAuthError as err:
         return _error_result("auth_error", str(err), False)
     except ValueError as err:
-        logger.error("Ошибка валидации при переносе %s: %s", event_id, err)
+        logger.error("Ошибка валидации при переносе события")
         return _error_result("validation_error", str(err), False)
     except NETWORK_EXCEPTIONS as api_err:
-        return _api_error_result(api_err, f"при переносе {event_id}")
+        return _api_error_result(api_err, "при переносе события")
     except Exception as err:  # noqa: BLE001
-        logger.exception("Внутренняя ошибка при переносе %s", event_id)
-        return _error_result("internal_error", str(err), True)
+        logger.error("Внутренняя ошибка при переносе события (%s)", type(err).__name__)
+        return _error_result("internal_error", "Внутренняя ошибка переноса события", True)
     finally:
         await _close_service(service)
 
@@ -376,21 +380,19 @@ async def delete_event(
             await asyncio.to_thread(_execute_request, req)
         except HttpError as api_err:
             if api_err.resp.status in (404, 410):
-                logger.info("Событие %s уже удалено", event_id)
                 return {"status": "success", "already_deleted": True}
             raise
-        logger.info("Событие %s удалено", event_id)
         return {"status": "success"}
 
     except CalendarAuthError as err:
         return _error_result("auth_error", str(err), False)
     except ValueError as err:
-        logger.error("Ошибка валидации при удалении %s: %s", event_id, err)
+        logger.error("Ошибка валидации при удалении события")
         return _error_result("validation_error", str(err), False)
     except NETWORK_EXCEPTIONS as api_err:
-        return _api_error_result(api_err, f"при удалении {event_id}")
+        return _api_error_result(api_err, "при удалении события")
     except Exception as err:  # noqa: BLE001
-        logger.exception("Внутренняя ошибка при удалении %s", event_id)
-        return _error_result("internal_error", str(err), True)
+        logger.error("Внутренняя ошибка при удалении события (%s)", type(err).__name__)
+        return _error_result("internal_error", "Внутренняя ошибка удаления события", True)
     finally:
         await _close_service(service)

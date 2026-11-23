@@ -25,16 +25,17 @@ class STTProcessor:
         self.pipe = pipeline(
             "automatic-speech-recognition",
             model=model_name,
-            device=self.device
+            device=self.device,
+            model_kwargs={"use_safetensors": True},
         )
         print(f"✅ STT-модель загружена на устройстве: {self.device}")
     
-    def transcribe(self, audio_path: str, language: str = "russian") -> str:
+    def transcribe(self, audio_path: str | bytes, language: str = "russian") -> str:
         """
         Распознаёт речь из аудиофайла.
         
         Args:
-            audio_path: Путь к аудиофайлу (.ogg, .wav, .mp3 и др.)
+            audio_path: Путь к аудиофайлу или байты закодированного аудио.
             language: Язык распознавания (по умолчанию 'russian')
             
         Returns:
@@ -44,11 +45,9 @@ class STTProcessor:
             FileNotFoundError: Если файл не найден
             ValueError: Если файл пустой
         """
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Аудиофайл не найден: {audio_path}")
-        
-        if os.path.getsize(audio_path) == 0:
-            raise ValueError(f"Аудиофайл пустой: {audio_path}")
+        size = len(audio_path) if isinstance(audio_path, bytes) else os.path.getsize(audio_path)
+        if not size:
+            raise ValueError("Аудиофайл пустой")
         
         # Распознавание
         result = self.pipe(

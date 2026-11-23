@@ -21,6 +21,8 @@ def build_fake_db() -> types.ModuleType:
         id = Column(Integer, primary_key=True)
         user_id = Column(BigInteger)
         title = Column(String)
+        status = Column(String)
+        confirmed_at = Column(DateTime)
         google_event_id = Column(String)
 
     class Operation(Base):

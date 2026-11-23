@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import StatementError
 
 from calendarr.tests import fake_db
 
@@ -36,6 +37,20 @@ def conn(monkeypatch):
 async def get_op(op_id):
     async with db.async_session() as s:
         return await s.get(db.Operation, op_id)
+
+
+async def get_event(event_id):
+    async with db.async_session() as s:
+        return await s.get(db.Event, event_id)
+
+
+async def add_waiting_event(event_id, user_id=1):
+    async with db.async_session.begin() as s:
+        s.add(db.Event(id=event_id, user_id=user_id, title="stored title", status="waiting"))
+
+
+def event_payload(event):
+    return {"summary": event.title}
 
 
 async def enqueue_create(**kw):
@@ -163,3 +178,75 @@ async def test_create_or_enqueue(conn):
     async with db.async_session() as s:
         n = len((await s.execute(select(db.Operation))).scalars().all())
     assert n == 1
+
+
+async def test_confirmation_only_queues_owned_waiting_event_once(conn):
+    await add_waiting_event(10)
+    assert await q.confirm_event_and_enqueue(2, 10, event_payload) is None
+    op_id = await q.confirm_event_and_enqueue(1, 10, event_payload)
+    assert await q.confirm_event_and_enqueue(1, 10, event_payload) is None
+
+    operation = await get_op(op_id)
+    event = await get_event(10)
+    assert event.status == "queued" and event.confirmed_at is not None
+    assert operation.status == "pending" and operation.event_id == event.id
+    assert operation.data["event_data"] == {"summary": "stored title"}
+    assert operation.data["google_event_id"]
+    conn["create_event"].assert_not_awaited()
+
+
+async def test_failed_operation_insert_rolls_back_confirmation(conn):
+    await add_waiting_event(10)
+    with pytest.raises(StatementError):
+        await q.confirm_event_and_enqueue(1, 10, lambda event: {"invalid": object()})
+
+    event = await get_event(10)
+    assert event.status == "waiting" and event.confirmed_at is None
+    assert await q.claim_due_operations() == []
+    conn["create_event"].assert_not_awaited()
+
+
+async def test_create_reuses_saved_id_after_failure_finalizing(conn, monkeypatch):
+    await add_waiting_event(10)
+    op_id = await q.confirm_event_and_enqueue(1, 10, event_payload)
+    saved_id = (await get_op(op_id)).data["google_event_id"]
+    conn["create_event"].return_value = {**OK, "event_id": saved_id}
+    with monkeypatch.context() as context:
+        context.setattr(q, "_finish", AsyncMock(side_effect=RuntimeError("db disconnected")))
+        with pytest.raises(RuntimeError, match="db disconnected"):
+            await q.process_pending_calendar_operations("st")
+
+    old_lease = (await get_op(op_id)).next_attempt_at
+    assert (await get_event(10)).status == "queued"
+    monkeypatch.setattr(q, "_utcnow", lambda: old_lease + timedelta(seconds=1))
+    stats = await q.process_pending_calendar_operations("st")
+
+    assert stats["success"] == 1
+    assert (await get_op(op_id)).status == "done"
+    event = await get_event(10)
+    assert event.status == "confirmed" and event.google_event_id == saved_id
+    calls = conn["create_event"].await_args_list
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0].args[2]["google_event_id"] == saved_id
+
+
+async def test_expired_worker_cannot_finalize_reclaimed_operation(monkeypatch):
+    await add_waiting_event(10)
+    op_id = await q.confirm_event_and_enqueue(1, 10, event_payload)
+    first, = await q.claim_due_operations()
+    monkeypatch.setattr(q, "_utcnow", lambda: first.next_attempt_at + timedelta(seconds=1))
+    second, = await q.claim_due_operations()
+
+    assert not await q._finish(op_id, "done", lease_until=first.next_attempt_at, google_id="old")
+    assert (await get_event(10)).google_event_id is None
+    assert (await get_op(op_id)).next_attempt_at == second.next_attempt_at
+
+
+async def test_permanent_create_error_marks_confirmed_request_failed(conn):
+    await add_waiting_event(10)
+    op_id = await q.confirm_event_and_enqueue(1, 10, event_payload)
+    conn["create_event"].return_value = BAD
+    stats = await q.process_pending_calendar_operations("st")
+    assert stats["failed"] == 1
+    assert (await get_op(op_id)).status == "failed"
+    assert (await get_event(10)).status == "failed"

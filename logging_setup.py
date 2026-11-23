@@ -1,4 +1,6 @@
 import logging
+import os
+import traceback
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -7,7 +9,6 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import Update
 
-# Контекст текущего апдейта: пользователь и событие
 ctx_user: ContextVar[str] = ContextVar("ctx_user", default="-")
 ctx_event: ContextVar[str] = ContextVar("ctx_event", default="-")
 
@@ -15,8 +16,23 @@ LOG_FORMAT = "%(asctime)s | %(levelname)-7s | user=%(user)s | event=%(event)s | 
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
+class SafeExceptionFormatter(logging.Formatter):
+    def formatException(self, exc_info) -> str:
+        kind, _, frames = exc_info
+        return "".join(traceback.format_tb(frames)) + (kind.__name__ if kind else "")
+
+
+def _hide_exception_messages(record: logging.LogRecord) -> bool:
+    # SDKs may log an exception both as a format argument and as a traceback.
+    if isinstance(record.args, tuple):
+        record.args = tuple(
+            type(arg).__name__ if isinstance(arg, BaseException) else arg
+            for arg in record.args
+        )
+    return True
+
+
 def setup_logging(level: int = logging.INFO, log_dir: str = "logs") -> None:
-    # 1. Каждая запись (включая логи aiogram) получает user и event
     old_factory = logging.getLogRecordFactory()
 
     def record_factory(*args, **kwargs):
@@ -27,50 +43,31 @@ def setup_logging(level: int = logging.INFO, log_dir: str = "logs") -> None:
 
     logging.setLogRecordFactory(record_factory)
 
-    # 2. Хендлеры
-    Path(log_dir).mkdir(exist_ok=True)
-    formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if os.getenv("LOG_TO_FILES", "1") != "0":
+        path = Path(log_dir)
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(
+            path / "bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8",
+        ))
+        errors = RotatingFileHandler(
+            path / "errors.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+        )
+        errors.setLevel(logging.ERROR)
+        handlers.append(errors)
 
-    console = logging.StreamHandler()
-    console.setFormatter(formatter)
+    formatter = SafeExceptionFormatter(LOG_FORMAT, DATE_FORMAT)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+        handler.addFilter(_hide_exception_messages)
+    logging.basicConfig(level=level, handlers=handlers, force=True)
 
-    # Все логи INFO+ -> logs/bot.log (до 10 МБ, 5 старых файлов)
-    file_all = RotatingFileHandler(
-        f"{log_dir}/bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-    )
-    file_all.setFormatter(formatter)
-
-    # Только ошибки -> logs/errors.log
-    file_errors = RotatingFileHandler(
-        f"{log_dir}/errors.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-    )
-    file_errors.setLevel(logging.ERROR)
-    file_errors.setFormatter(formatter)
-
-    logging.basicConfig(level=level, handlers=[console, file_all, file_errors], force=True)
-
-    # 3. Приглушаем шумные библиотеки
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-def _describe_event(update: Update) -> str:
-    if update.message:
-        m = update.message
-        text = m.text or m.caption or str(m.content_type)
-        return f"message:{text[:50]}"
-    if update.callback_query:
-        return f"callback:{update.callback_query.data}"
-    return str(update.event_type)  # inline_query, my_chat_member и т.д.
-
-
 class LoggingContextMiddleware(BaseMiddleware):
-    """Запоминает пользователя и событие для всех логов этого апдейта.
-
-    Подключение в main.py:
-        setup_logging()  # до всего остального
-        dp.update.outer_middleware(LoggingContextMiddleware())
-    """
+    """Добавляет тип обновления и ID пользователя в журналы обработки."""
 
     async def __call__(
         self,
@@ -79,7 +76,10 @@ class LoggingContextMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = data.get("event_from_user")
-        if user:
-            ctx_user.set(f"{user.id}(@{user.username})" if user.username else str(user.id))
-        ctx_event.set(_describe_event(event))
-        return await handler(event, data)
+        event_context = ctx_event.set(str(event.event_type))
+        user_context = ctx_user.set(str(user.id) if user else "-")
+        try:
+            return await handler(event, data)
+        finally:
+            ctx_user.reset(user_context)
+            ctx_event.reset(event_context)

@@ -90,6 +90,11 @@ async def get_consent(user_id: int):
             return None
 
 
+async def has_active_consent(user_id: int) -> bool:
+    consent = await get_consent(user_id)
+    return consent is not None and consent.accepted_at is not None and consent.revoked_at is None
+
+
 async def add_consent(user_id: int, policy_version: str, accepted_at: datetime,
                       revoked_at: Optional[datetime] = None):
     '''добавление согласия пользователя. Возвращает True/False'''
@@ -180,13 +185,15 @@ async def get_event(event_id: int):
 async def add_event(user_id: int, chat_id: int, title: str, starts_at: datetime, timezone: str, status: str,
                     duration: Optional[str] = None, ends_at: Optional[datetime] = None,
                     location: Optional[str] = None, participants: Optional[list[dict[str, Any]]] = None,
-                    confirmed_at: Optional[datetime] = None, google_event_id: Optional[str] = None):
+                    confirmed_at: Optional[datetime] = None, google_event_id: Optional[str] = None,
+                    *, repeating: str | None = None):
     '''добавление события, возвращает id события или None при ошибке'''
     async with async_session() as session:
         try:
             event = Event(user_id=user_id, chat_id=chat_id, title=title, starts_at=starts_at, timezone=timezone,
                           status=status, duration=duration, ends_at=ends_at, location=location,
-                          participants=participants, confirmed_at=confirmed_at, google_event_id=google_event_id)
+                          participants=participants, confirmed_at=confirmed_at, google_event_id=google_event_id,
+                          repeating=repeating)
             session.add(event)
             await session.flush()
             event_id = event.id
@@ -198,7 +205,7 @@ async def add_event(user_id: int, chat_id: int, title: str, starts_at: datetime,
             return None
 
 
-async def update_event(event_id: int, **fields):
+async def update_event(event_id: int, *, waiting_user_id: int | None = None, **fields):
     '''изменение события: передаются только те поля, которые нужно поменять. Возвращает True/False'''
     unknown = set(fields) - EVENT_FIELDS
     if unknown:
@@ -207,7 +214,10 @@ async def update_event(event_id: int, **fields):
         return False
     async with async_session() as session:
         try:
-            result = await session.execute(update(Event).where(Event.id == event_id).values(**fields))
+            statement = update(Event).where(Event.id == event_id)
+            if waiting_user_id is not None:
+                statement = statement.where(Event.user_id == waiting_user_id, Event.status == "waiting")
+            result = await session.execute(statement.values(**fields))
             await session.commit()
             return result.rowcount > 0
         except Exception:

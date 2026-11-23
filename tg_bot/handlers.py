@@ -1,110 +1,142 @@
 import asyncio
-import os
-from aiogram import Router, types, F
+import html
+from datetime import datetime
+from io import BytesIO
+from zoneinfo import ZoneInfo
+
+from aiogram import F, Router, types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from zoneinfo import ZoneInfo
-import html
-from datetime import datetime
 
+from calendarr.calendar_queue import confirm_event_and_enqueue
+from calendarr.nlp_adapter import build_event_data
+from calendarr.oauth import build_auth_url
 from config import bot, logger
-from modules.stt_module import STTProcessor
+from database.models import (
+    add_buss_conn, add_event, get_buss_conn, get_event, get_user, has_active_consent, update_event,
+)
 from modules.nlp_module import (process_dialogue_message, DialogueState, DEFAULT_TZ, resolve_date,
                                  merge_clarification, get_zone, Event as NlpEvent, fill_datetimes,
                                  to_event_record)
 
-dialogue_states: dict[tuple[int, int], DialogueState] = {}
-from database.models import get_buss_conn, add_buss_conn, get_user, add_event, update_event, get_event
-from calendarr.oauth import build_auth_url
-from calendarr.calendar_queue import create_event_or_enqueue
-from calendarr.nlp_adapter import build_event_data
-from calendarr.storage import DBTokenStorage
 import tg_bot.keyboards as keyb
 
 rt = Router()
-stt = STTProcessor()
+dialogue_states: dict[tuple[int, int], DialogueState] = {}
+_stt = None
+_stt_lock = asyncio.Lock()
+
+
+async def initialize_stt():
+    global _stt
+    async with _stt_lock:
+        if _stt is None:
+            from modules.stt_module import STTProcessor
+
+            _stt = await asyncio.to_thread(STTProcessor)
+        return _stt
+
+
+async def _transcribe_voice(voice: types.Voice) -> str | None:
+    try:
+        processor = await initialize_stt()
+        async with _stt_lock:
+            with BytesIO() as audio:
+                await bot.download(voice, destination=audio)
+                return await asyncio.to_thread(processor.transcribe, audio.getvalue())
+    except Exception as error:
+        logger.warning("Не удалось обработать голосовое сообщение (%s)", type(error).__name__)
+        return None
+
 
 @rt.business_connection()
 async def check_business_conn(bus_conn: types.BusinessConnection):
-    '''Проверка бизнес подключения'''
     user_id = bus_conn.user.id
-    user = await get_buss_conn(user_id)
-    if user is not None and (bus_conn.id!=user.business_token or user.status is False or user.status is None) or user is None:
-        response = await add_buss_conn(user_id=user_id, business_token=bus_conn.id)
-        markup = None
-        if response:
-            text = "Вы успешно подключили бота к своему аккаунту!"
-            user = await get_buss_conn(user_id)
-            if user.google_token is None:
-                markup = keyb.google_conn_kb()
-                text+="\n\nПожалуйста, свяжите бота с google-календарём"
-        else:
-            text = "Ошибка при попытке подключения бота."
-        await bot.send_message(chat_id=user.user_id, text=text, reply_markup=markup)
+    if not await has_active_consent(user_id):
+        return
+    connection = await get_buss_conn(user_id)
+    already_linked = connection is not None and connection.business_token == bus_conn.id
+    if not bus_conn.is_enabled:
+        if already_linked:
+            await add_buss_conn(user_id=user_id, business_token=bus_conn.id, status=False)
+        return
+    if already_linked and connection.status:
+        return
+    if not await add_buss_conn(user_id=user_id, business_token=bus_conn.id, status=True):
+        await bot.send_message(chat_id=user_id, text="Не удалось подключить бота.")
+        return
+    markup = None
+    text = "Вы успешно подключили бота к своему аккаунту!"
+    if connection is None or connection.google_token is None:
+        markup = keyb.google_conn_kb()
+        text += "\n\nПожалуйста, подключите Google Календарь."
+    await bot.send_message(chat_id=user_id, text=text, reply_markup=markup)
+
 
 @rt.callback_query(F.data=="google_connect")
 async def google_connect(call: types.CallbackQuery):
+    if not await has_active_consent(call.from_user.id):
+        await call.answer("Сначала подтвердите согласие через /start.", show_alert=True)
+        return
     try:
         url = build_auth_url(user_id=call.from_user.id)
-    except Exception as e:
-        logger.warning("Произошла ошибка при генерации ссылки: %s", e)
+    except Exception as error:
+        logger.warning("Не удалось подготовить ссылку Google OAuth (%s)", type(error).__name__)
         await call.message.edit_text(text="Произошла ошибка при генерации ссылки.")
-        return False
+        await call.answer()
+        return
     kb = InlineKeyboardBuilder()
     kb.button(text="🔗 Ссылка для подключения", url=url)
     await call.message.edit_text(text="Пожалуйста, перейдите по ссылке ниже, чтобы подключить календарь!", reply_markup=kb.as_markup())
+    await call.answer()
 
 @rt.business_message()
 async def new_message(msg: types.Message):
-    if msg.chat.type=='private':
+    if msg.chat.type != "private" or not msg.business_connection_id or not (msg.voice or msg.text):
+        return
+    try:
         buss_conn = await bot.get_business_connection(msg.business_connection_id)
-        user = await get_user(buss_conn.user.id)
-        if msg.voice:
-            file_id = msg.voice.file_id
-            file_info = await bot.get_file(file_id)
-            file_destination = f'voices/{file_id}.ogg'
-            await bot.download(file_info, destination=file_destination)
-            text = stt.transcribe(audio_path=file_destination)
-            os.remove(file_destination)
-        else:
-            text = msg.text
-        if not text or not text.strip():
-            return  # стикеры, фото без подписи и т.п.
-        owner_id = buss_conn.user.id
-        tz = user.timezone if user is not None and user.timezone else DEFAULT_TZ
-        dialogue_state = dialogue_states.setdefault((owner_id, msg.chat.id), DialogueState())
-        try:
-            answ = await asyncio.to_thread(
-                process_dialogue_message, text=text, state=dialogue_state, message_time=msg.date, tz=tz,
-            )
-        except ValueError as e:
-            logger.warning("NLP отклонил сообщение: %s", e)
-            return
-        status = answ.get("status")
-        intent = (answ.get("event") or {}).get("intent")
-        logger.info("NLP status=%s intent=%s", status, intent)
+    except Exception as error:
+        logger.warning("Не удалось проверить подключение Telegram Business (%s)", type(error).__name__)
+        return
+    owner_id = buss_conn.user.id
+    dialogue_key = (owner_id, msg.chat.id)
+    if (buss_conn.id != msg.business_connection_id
+            or not buss_conn.is_enabled
+            or not await has_active_consent(owner_id)):
+        dialogue_states.pop(dialogue_key, None)
+        return
 
-        # Черновик события живёт в dialogue_state 30 минут, и пока он там лежит, NLP возвращает
-        # его на КАЖДОЕ следующее сообщение — даже на «как дела». Поэтому черновик сбрасываем,
-        # как только он обработан, иначе уведомление приходило бы на любое сообщение
-        if intent in ("move", "cancel"):
-            # перенос/отмена пока не поддерживаются (нужен выбор события)
-            dialogue_state.reset()
-            return
-        if status == "needs_clarification" and intent == "create":
-            # «часов в 5» — время неоднозначное (05:00 или 17:00). Показываем карточку с наиболее
-            # вероятным вариантом и вопросом; время можно поправить кнопкой «Изменить».
-            guessed = _guess_ambiguous_time(answ, msg.date, tz)
-            if guessed is not None:
-                answ, status = guessed, "ok"
-        if status != "ok" or intent != "create":
-            # no_event — в сообщении нет события; needs_clarification без даты или времени
-            # (например, «встретимся завтра»): ждём, пока они появятся в переписке, и молчим
-            return
+    text = await _transcribe_voice(msg.voice) if msg.voice else msg.text
+    if not text or not text.strip():
+        return
+    user = await get_user(owner_id)
+    tz = user.timezone if user is not None and user.timezone else DEFAULT_TZ
+    dialogue_state = dialogue_states.setdefault(dialogue_key, DialogueState())
+    try:
+        answ = await asyncio.to_thread(
+            process_dialogue_message, text=text, state=dialogue_state, message_time=msg.date, tz=tz,
+        )
+    except ValueError:
+        logger.warning("NLP отклонил сообщение")
+        return
+    status = answ.get("status")
+    intent = (answ.get("event") or {}).get("intent")
+    logger.info("NLP status=%s intent=%s", status, intent)
+
+    # После обработки черновика не показываем его снова на каждое сообщение.
+    if intent in ("move", "cancel"):
         dialogue_state.reset()
-        await new_event(answ, user_id=owner_id, chat_id=msg.chat.id, msg_from=msg.from_user.id,
-                        msg_to=msg.receiver_user.id if msg.receiver_user else None, user_tz=tz)
+        return
+    if status == "needs_clarification" and intent == "create":
+        guessed = _guess_ambiguous_time(answ, msg.date, tz)
+        if guessed is not None:
+            answ, status = guessed, "ok"
+    if status != "ok" or intent != "create":
+        return
+    dialogue_state.reset()
+    await new_event(answ, user_id=owner_id, chat_id=msg.chat.id, user_tz=tz)
 
 def _guess_ambiguous_time(answ: dict, message_time: datetime, tz: str) -> dict | None:
     """Если не хватает только однозначного времени, а дата и вариант времени есть, — подставляет
@@ -128,11 +160,6 @@ def _guess_ambiguous_time(answ: dict, message_time: datetime, tz: str) -> dict |
     if not ev.starts_at:
         return None
     return {**answ, "status": "ok", "event": {**raw, "starts_at": ev.starts_at, "ends_at": ev.ends_at}}
-
-
-# Правило повторения в таблице events пока не хранится (колонка repeating не сделана),
-# поэтому держим его в памяти до нажатия «Добавить». После перезапуска бота повтор теряется.
-pending_rrules: dict[int, str] = {}
 
 
 class EditEvent(StatesGroup):
@@ -166,7 +193,14 @@ def _event_card(ev) -> list[str]:
 
 
 def _card_text(ev) -> str:
-    return '\n'.join(['Событие:', *_event_card(ev), 'Выберите действие:'])
+    status = {
+        "waiting": "Выберите действие:",
+        "queued": "⏳ Событие в очереди на добавление в Google Календарь.",
+        "confirmed": "✅ Событие добавлено в Google Календарь.",
+        "failed": "⚠️ Не удалось добавить событие в Google Календарь.",
+        "declined": "❌ Событие не добавлено.",
+    }
+    return '\n'.join(["Событие:", *_event_card(ev), status.get(ev.status, "Статус недоступен.")])
 
 
 def _event_kb(event_id: int):
@@ -175,6 +209,12 @@ def _event_kb(event_id: int):
     kb.button(text='✍️ Изменить', callback_data=f'ev:edit:{event_id}')
     kb.button(text='🚫 Не добавлять', callback_data=f'ev:del:{event_id}')
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def _status_kb(event_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Проверить статус", callback_data=f"ev:show:{event_id}")
     return kb.as_markup()
 
 
@@ -201,7 +241,7 @@ def _parse_new_time(text: str, ev) -> datetime | None:
     return datetime(day.year, day.month, day.day, int(hhmm[:2]), int(hhmm[3:]))
 
 
-async def new_event(answ, user_id, chat_id, user_tz, msg_from=None, msg_to=None):
+async def new_event(answ, user_id, chat_id, user_tz):
     rec = to_event_record(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
     if rec is None:  # не create или статус не ok — сюда не должно попадать
         logger.warning("new_event: NLP-результат не подходит для создания события")
@@ -213,20 +253,34 @@ async def new_event(answ, user_id, chat_id, user_tz, msg_from=None, msg_to=None)
         duration=str(int(rec["duration"].total_seconds() // 60)) if rec["duration"] else None,
         timezone=rec["timezone"], location=rec["location"],
         participants=rec["participants"] or None,
+        repeating=rec["rrule"],
         status="waiting",
     )
     if event_id is None:
         await bot.send_message(chat_id=user_id, text="Не удалось сохранить новое событие. Попробуйте позже.")
         return
-    if rec["rrule"]:
-        pending_rrules[event_id] = rec["rrule"]
-
     saved = await get_event(event_id)
+    if saved is None:
+        await bot.send_message(chat_id=user_id, text="Не удалось показать карточку события.")
+        return
     lines = ['Обнаружено новое событие:', *_event_card(saved)]
     if answ.get("clarify"):
         lines.append(f'❓ {html.escape(answ["clarify"])}')
     lines.append('Выберите действие:')
     await bot.send_message(chat_id=user_id, text='\n'.join(lines), reply_markup=_event_kb(event_id))
+
+
+def _calendar_event_data(ev):
+    return build_event_data(
+        summary=ev.title,
+        start_time=ev.starts_at.isoformat(),
+        end_time=ev.ends_at.isoformat() if ev.ends_at else None,
+        duration_minutes=int(ev.duration) if ev.duration and ev.duration.isdigit() else None,
+        timezone=ev.timezone or DEFAULT_TZ,
+        attendees=[p.get("name") for p in ev.participants or [] if p.get("name")],
+        location=ev.location,
+        rrule=ev.repeating,
+    )
 
 
 async def _add_to_calendar(call: types.CallbackQuery, ev):
@@ -236,43 +290,28 @@ async def _add_to_calendar(call: types.CallbackQuery, ev):
     if not ev.starts_at:
         await call.answer("У события не указано время начала — уточните его.", show_alert=True)
         return
+    if not await has_active_consent(ev.user_id):
+        await call.answer("Сначала подтвердите согласие через /start.", show_alert=True)
+        return
     conn_info = await get_buss_conn(ev.user_id)
     if conn_info is None or conn_info.google_token is None:
         await call.message.answer("Сначала подключите Google Календарь:", reply_markup=keyb.google_conn_kb())
         await call.answer()
         return
+    try:
+        operation_id = await confirm_event_and_enqueue(ev.user_id, ev.id, _calendar_event_data)
+    except Exception as error:
+        logger.warning("Не удалось поставить событие в очередь (%s)", type(error).__name__)
+        await call.answer("Не удалось сохранить событие. Попробуйте ещё раз.", show_alert=True)
+        return
+    if operation_id is None:
+        await call.answer("Событие уже обработано.", show_alert=True)
+        return
 
-    event_data = build_event_data(
-        summary=ev.title,
-        start_time=ev.starts_at.isoformat(),
-        end_time=ev.ends_at.isoformat() if ev.ends_at else None,
-        duration_minutes=int(ev.duration) if ev.duration and ev.duration.isdigit() else None,
-        timezone=ev.timezone or DEFAULT_TZ,
-        attendees=[p.get("name") for p in ev.participants or [] if p.get("name")],
-        location=ev.location,
-        rrule=pending_rrules.get(ev.id),
-    )
-
-    await call.answer("Добавляю в календарь…")
-    result = await create_event_or_enqueue(ev.user_id, DBTokenStorage(), event_data, local_event_id=ev.id)
-    card = '\n'.join(_event_card(ev))
-
-    if result.get("status") == "success":
-        pending_rrules.pop(ev.id, None)
-        await update_event(ev.id, status="confirmed", confirmed_at=datetime.now().replace(microsecond=0))
-        link = result.get("html_link")
-        done = f'<a href="{html.escape(link)}">✅ Добавлено в календарь</a>' if link else "✅ Добавлено в календарь"
-        await call.message.edit_text(f"{card}\n\n{done}")
-    elif result.get("queued"):
-        pending_rrules.pop(ev.id, None)
-        await update_event(ev.id, status="queued")
-        await call.message.edit_text(f"{card}\n\n⏳ Google Календарь временно недоступен — событие добавится автоматически.")
-    elif result.get("error_type") == "auth_error":
-        await call.message.answer("Доступ к Google Календарю потерян. Подключите его заново:",
-                                  reply_markup=keyb.google_conn_kb())
-    else:
-        logger.warning("Не удалось создать событие id=%s: %s", ev.id, result)
-        await call.message.answer(f"Не удалось добавить событие: {html.escape(result.get('message') or 'неизвестная ошибка')}")
+    await call.answer("Событие сохранено.")
+    saved = await get_event(ev.id)
+    text = _card_text(saved) if saved is not None else "⏳ Событие поставлено в очередь."
+    await call.message.edit_text(text, reply_markup=_status_kb(ev.id))
 
 
 @rt.callback_query(F.data.startswith("ev:"))
@@ -318,12 +357,18 @@ async def action_event(call: types.CallbackQuery, state: FSMContext):
             extra = [m for m in (await state.get_data()).get("cleanup", []) if m != call.message.message_id]
             await state.clear()
             await _delete_messages(call.message.chat.id, extra)
-            await call.message.edit_text(_card_text(ev),
-                                         reply_markup=_event_kb(event_id) if ev.status == "waiting" else None)
+            # Повторное нажатие для статуса «в очереди» не меняет карточку.
+            if ev.status != "queued":
+                markup = _event_kb(event_id) if ev.status == "waiting" else None
+                await call.message.edit_text(_card_text(ev), reply_markup=markup)
+            else:
+                await call.answer("Событие ещё в очереди.")
+                return
             await call.answer()
         case "del":
-            await update_event(event_id, status="declined")
-            pending_rrules.pop(event_id, None)
+            if not await update_event(event_id, waiting_user_id=ev.user_id, status="declined"):
+                await call.answer("Событие больше нельзя отклонить.", show_alert=True)
+                return
             await call.message.edit_text('\n'.join(_event_card(ev)) + "\n\n❌ Не добавлено")
             await call.answer()
         case _:
@@ -386,10 +431,12 @@ async def edit_event_value(msg: types.Message, state: FSMContext):
             await state.clear()
             return
 
-    if not await update_event(event_id, **changes):
+    if not await update_event(event_id, waiting_user_id=ev.user_id, **changes):
         await _reply_and_remember(msg, state, "Не удалось сохранить изменения. Попробуйте ещё раз.")
         return
     await state.clear()
     await _delete_messages(msg.chat.id, data.get("cleanup", []))
     ev = await get_event(event_id)
-    await msg.answer(_card_text(ev), reply_markup=_event_kb(event_id))
+    if ev is not None:
+        markup = _event_kb(event_id) if ev.status == "waiting" else None
+        await msg.answer(_card_text(ev), reply_markup=markup)

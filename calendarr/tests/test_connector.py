@@ -96,6 +96,27 @@ async def test_409_active_is_duplicate():
     svc.events().update.assert_not_called()
 
 
+async def test_conflict_reuses_persisted_event_id():
+    saved_id = "b" * 32
+    svc = _service(insert=_http_error(409), get={"status": "confirmed"})
+    data = _data(google_event_id=saved_id)
+    res = await _create(svc, data)
+    assert res["duplicate"] is True and res["event_id"] == saved_id
+    assert svc.events().insert.call_args.kwargs["body"]["id"] == saved_id
+    assert svc.events().get.call_args.kwargs["eventId"] == saved_id
+
+
+async def test_provider_error_body_not_logged_or_returned(caplog):
+    error = _http_error(503)
+    error.uri = "https://example.org/?token=private-credential"
+    svc = _service(insert=error)
+    result = await _create(svc, _data(summary="private-title"))
+    assert result["need_queue"] is True
+    assert "private-credential" not in result["message"]
+    assert "private-credential" not in caplog.text
+    assert "private-title" not in caplog.text
+
+
 async def test_delete_404_is_success():
     svc = _service(delete=_http_error(404))
     with patch("calendarr.calendar_connector.get_calendar_service", AsyncMock(return_value=svc)):

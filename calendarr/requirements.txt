@@ -10,3 +10,5 @@ aiohttp>=3.9
 tzdata
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
+aiogram>=3.31.0,<4
+aiosqlite>=0.22.1

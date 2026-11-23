@@ -33,8 +33,8 @@ class DBTokenStorage:
             return None
         try:
             return json.loads(row)
-        except (TypeError, ValueError) as err:
-            logger.error("Битый JSON в google_token у user_id=%s: %s", user_id, err)
+        except (TypeError, ValueError):
+            logger.error("Некорректный формат сохранённого Google-токена user_id=%s", user_id)
             return None
 
     async def save_user_token(self, user_id: int, token_data: dict[str, Any]) -> None:
@@ -51,7 +51,7 @@ class DBTokenStorage:
                     await session.commit()
             except Exception as err:
                 await session.rollback()
-                logger.exception("Не удалось сохранить google_token user_id=%s: %s", user_id, err)
+                logger.error("Не удалось сохранить Google-токен user_id=%s (%s)", user_id, type(err).__name__)
                 raise
 
     @staticmethod
@@ -89,5 +89,5 @@ class DBTokenStorage:
                 await session.commit()
             except Exception as err:
                 await session.rollback()
-                logger.exception("Не удалось отозвать google_token user_id=%s: %s", user_id, err)
+                logger.error("Не удалось отозвать Google-токен user_id=%s (%s)", user_id, type(err).__name__)
                 raise

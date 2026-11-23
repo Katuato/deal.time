@@ -1,3 +1,4 @@
+import html
 import re
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
@@ -9,7 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from datetime import datetime
 from config import bot, logger
-from database.models import add_user, get_user, edit_user, add_consent, get_consent, edit_consent, get_buss_conn, add_buss_conn
+from database.models import add_user, get_user, edit_user, add_consent, has_active_consent, edit_consent, get_buss_conn, add_buss_conn
 import tg_bot.keyboards as keyb
 us = Router()
 
@@ -78,15 +79,18 @@ async def continue_setup(user_id: int):
         await message_buss_conn(user_id)
         return
     try:
-        await bot.get_business_connection(business_connection_id=connection.business_token)
+        business = await bot.get_business_connection(business_connection_id=connection.business_token)
     except Exception as e:
         if "business connection not found" in str(e):
             await bot.send_message(chat_id=user_id, text="Ваше подключение устарело/не найдено.\n"
                                    "Нажмите кнопку ниже, перейдите в раздел 'Автоматизация чатов', и добавьте нашего бота: <code>@deluvremyabot</code>",
                                    reply_markup=goto_settings_button())
         else:
-            logger.warning("Ошибка при попытке получения bus conn: %s", e)
+            logger.warning("Не удалось проверить подключение Telegram Business (%s)", type(e).__name__)
             await bot.send_message(chat_id=user_id, text="Произошла непредвиденная ошибка.")
+        return
+    if not business.is_enabled or business.user.id != user_id:
+        await message_buss_conn(user_id)
         return
     if connection.google_token is None:
         await bot.send_message(chat_id=user_id, text="Пожалуйста, свяжите бота с google-календарём", reply_markup=keyb.google_conn_kb())
@@ -99,12 +103,13 @@ async def continue_setup(user_id: int):
 @us.message(CommandStart())
 async def command_start(msg: Message, state: FSMContext):
     await state.clear()
-    consent = await get_consent(msg.from_user.id)
-    if consent is None or consent.revoked_at is not None:
+    if not await has_active_consent(msg.from_user.id):
         kb = InlineKeyboardBuilder()
-        kb.button(text="Я ознакомлен(-а) с пользовательским соглашением", callback_data="user_consent_accept")
-        await msg.answer(f"Здравствуйте, {msg.from_user.full_name}!\n\n"
-                        f"Перед началом использования прочтите <a href='https://google.com/'>Пользовательское соглашение</a>.",
+        kb.button(text="Разрешаю обработку сообщений", callback_data="user_consent_accept")
+        await msg.answer(f"Здравствуйте, {html.escape(msg.from_user.full_name)}!\n\n"
+                        "Бот обрабатывает текстовые и голосовые сообщения из выбранных вами чатов "
+                        "Telegram Business, чтобы предлагать события. Подтверждённые события передаются "
+                        "в подключённый Google Календарь. Доступ к переписке можно выключить в Telegram Business.",
                         reply_markup=kb.as_markup())
         return
     user = await get_user(msg.from_user.id)
@@ -118,14 +123,15 @@ async def command_start(msg: Message, state: FSMContext):
 @us.callback_query(F.data=="user_consent_accept")
 async def user_consent_accept(call: CallbackQuery):
     date = datetime.now(tz=ZoneInfo("Europe/Moscow")).replace(tzinfo=None, microsecond=0)
-    result = await edit_consent(user_id=call.from_user.id, policy_version='123', accepted_at=date, revoked_at=None)
+    result = await edit_consent(user_id=call.from_user.id, policy_version="business-messages-v1",
+                                accepted_at=date, revoked_at=None)
     if result is False:
-        result = await add_consent(user_id=call.from_user.id, policy_version='123', accepted_at=date)
+        result = await add_consent(user_id=call.from_user.id, policy_version="business-messages-v1", accepted_at=date)
         if result is False:
             await call.answer("Не удалось записать информацию о вашем согласии. Пожалуйста, обратитесь в поддержку", show_alert=True)
             return False
     await add_user(user_id=call.from_user.id)
-    await call.answer("✅ Пользовательское соглашение принято")
+    await call.answer("✅ Согласие сохранено")
     user = await get_user(call.from_user.id)
     if user is not None and user.timezone:
         await call.message.delete_reply_markup()
@@ -152,7 +158,7 @@ async def save_timezone(user_id: int, tz: str) -> bool:
         return False
     now = datetime.now(ZoneInfo(tz)).strftime("%H:%M")
     await bot.send_message(chat_id=user_id, text=f"✅ Часовой пояс: {timezone_title(tz)}. Сейчас у вас {now}.")
-    if first_time:
+    if first_time and await has_active_consent(user_id):
         await continue_setup(user_id)
     return True
 
