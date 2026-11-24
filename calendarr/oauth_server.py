@@ -1,13 +1,12 @@
-"""
-HTTP-сервер для redirect URI Google OAuth (aiohttp).
-Принимает ?code=...&state=..., обменивает код на токен, сохраняет его и уведомляет пользователя.
-"""
+"""HTTP-маршруты Google OAuth и проверки готовности приложения."""
 import html
 import logging
-import os
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from urllib.parse import urlparse
 
-from aiohttp import web
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 import config
 from calendarr import oauth
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CALLBACK_PATH = "/oauth2callback"
 
 
-def _page(title: str, text: str, status: int = 200) -> web.Response:
+def _page(title: str, text: str, status: int = 200) -> HTMLResponse:
     body = (
         "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -28,19 +27,21 @@ def _page(title: str, text: str, status: int = 200) -> web.Response:
         f"<body style=\"font-family:sans-serif;text-align:center;margin-top:15vh\">"
         f"<h2>{html.escape(title)}</h2><p>{html.escape(text)}</p></body></html>"
     )
-    return web.Response(text=body, status=status, content_type="text/html",
-                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+    return HTMLResponse(
+        body, status_code=status,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
 
 
-async def oauth_callback(request: web.Request) -> web.Response:
-    if request.query.get("error"):
+async def oauth_callback(request: Request) -> HTMLResponse:
+    if request.query_params.get("error"):
         logger.warning("Google OAuth вернул ошибку")
         return _page("Авторизация отменена",
                      "Google вернул ошибку или доступ не был предоставлен. "
                      "Вернитесь в бота и попробуйте снова.", 400)
 
-    code = request.query.get("code")
-    state = request.query.get("state")
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
     if not code or not state:
         logger.warning("OAuth callback без code/state")
         return _page("Некорректный запрос", "Отсутствуют параметры code или state.", 400)
@@ -79,30 +80,21 @@ def _callback_path() -> str:
     return urlparse(config.GOOGLE_REDIRECT_URI or "").path or DEFAULT_CALLBACK_PATH
 
 
-async def health(request: web.Request) -> web.Response:
+async def health() -> PlainTextResponse:
     try:
         await check_database()
     except Exception:
-        return web.Response(text="unavailable", status=503)
-    return web.Response(text="ok")
+        return PlainTextResponse("unavailable", status_code=503)
+    return PlainTextResponse("ok")
 
 
-def create_app() -> web.Application:
-    app = web.Application()
-    app.router.add_get("/healthz", health)
-    app.router.add_get(_callback_path(), oauth_callback)
+def create_app(
+    *, lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
+) -> FastAPI:
+    app = FastAPI(lifespan=lifespan, openapi_url=None, redirect_slashes=False)
+    callback_path = _callback_path()
+    if callback_path == "/healthz":
+        raise ValueError("Путь Google OAuth не может совпадать с /healthz")
+    app.add_api_route("/healthz", health, methods=["GET", "HEAD"], include_in_schema=False)
+    app.add_api_route(callback_path, oauth_callback, methods=["GET"], include_in_schema=False)
     return app
-
-
-async def start_oauth_server(host: str | None = None, port: int | None = None) -> web.AppRunner:
-    host = host or os.getenv("OAUTH_HOST", "0.0.0.0")
-    port = port or int(os.getenv("OAUTH_PORT", "8080"))
-    runner = web.AppRunner(create_app(), access_log=None)
-    await runner.setup()
-    try:
-        await web.TCPSite(runner, host, port).start()
-    except BaseException:
-        await runner.cleanup()
-        raise
-    logger.info("OAuth-сервер запущен на %s:%s (путь %s)", host, port, _callback_path())
-    return runner

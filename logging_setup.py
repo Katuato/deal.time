@@ -62,7 +62,6 @@ def setup_logging(level: int = logging.INFO, log_dir: str = "logs") -> None:
         handler.addFilter(_hide_exception_messages)
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
-    logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
