@@ -1,19 +1,45 @@
-# Модуль календаря «ДЕЛУ.ВРЕМЯ»
+# ДЕЛУ.ВРЕМЯ
 
-## Публичный API
+Выполняй команды на VPS из каталога с `compose.yaml` и `.env` под пользователем с доступом к Docker.
 
-```python
-from app.calendar.calendar_connector import (
-    create_event, update_event_time, delete_event, CalendarAuthError,
-)
-from app.calendar.storage import DBTokenStorage
+**Вход в GHCR.** Для закрытого образа введи токен GitHub с правом `read:packages` в поле пароля.
 
-storage = DBTokenStorage()
+```bash
+docker login ghcr.io --username GITHUB_LOGIN
+```
 
-result = await create_event(user_id, storage, event_data)
-# {"status": "success", "event_id": str, "html_link": str|None, "duplicate": bool}
-# {"status": "error", "error_type": "auth_error"|"api_error"|"api_unavailable"|"validation_error",
-#  "message": str, "need_queue": bool}
+**Выбор версии.** Подставь полный SHA опубликованного коммита из ветки `for_merge`.
 
-result = await update_event_time(user_id, storage, event_id, new_start, new_end, timezone="Europe/Moscow")
-result = await delete_event(user_id, storage, event_id)
+```bash
+export COMPOSE_FILE=compose.yaml:deploy/compose.vps.yaml
+export COMPOSE_PROJECT_NAME=delu-backend
+export DEAL_TIME_IMAGE=ghcr.io/katuato/deal.time:COMMIT_SHA
+```
+
+**Обновление.** Скачивает образ, применяет миграции и ждёт готовности бота.
+
+```bash
+docker compose pull bot &&
+  docker compose --profile tools run --rm --no-deps migrate &&
+  docker compose up -d --no-build --wait --wait-timeout 600 bot
+```
+
+**Статус.** Показывает состояние контейнера.
+
+```bash
+docker compose ps bot
+```
+
+**Логи.** Показывает последние 100 строк и новые сообщения.
+
+```bash
+docker compose logs --tail=100 -f bot
+```
+
+**Откат.** Запускает предыдущий образ при совместимой схеме БД. Подставь SHA предыдущего релиза.
+
+```bash
+export DEAL_TIME_IMAGE=ghcr.io/katuato/deal.time:PREVIOUS_COMMIT_SHA
+docker compose pull bot &&
+  docker compose up -d --no-build --wait --wait-timeout 600 bot
+```
