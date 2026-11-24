@@ -1,7 +1,7 @@
 x-runtime: &runtime
   image: ${DEAL_TIME_IMAGE:-deal-time:local}
   platform: linux/amd64
-  env_file: ${DEAL_TIME_ENV_FILE:-.env}
+  env_file: .env
   read_only: true
   cap_drop:
     - ALL
@@ -17,7 +17,6 @@ services:
     environment:
       OAUTH_HOST: 0.0.0.0
       OAUTH_PORT: '8080'
-      LOG_TO_FILES: '0'
     init: true
     restart: unless-stopped
     stop_grace_period: 45s

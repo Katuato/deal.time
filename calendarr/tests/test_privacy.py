@@ -123,11 +123,11 @@ async def test_update_logging_uses_event_type_and_resets_context():
 
 
 def test_console_logging_hides_exception_details_and_disables_file_logging(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("LOG_TO_FILES", "0")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(logging, "setLogRecordFactory", Mock())
     basic_config = Mock()
     monkeypatch.setattr(logging, "basicConfig", basic_config)
-    setup_logging(log_dir=str(tmp_path / "logs"))
+    setup_logging()
     [console] = basic_config.call_args.kwargs["handlers"]
 
     private_text = "private-exception-detail"

@@ -47,9 +47,8 @@ jobs:
           printf 'IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
 
       - name: Check image and Compose
-        env:
-          DEAL_TIME_ENV_FILE: .env.example
         run: |
+          cp .env.example .env
           DEAL_TIME_IMAGE="$IMAGE" docker compose -f compose.yaml -f deploy/compose.vps.yaml --profile tools config --quiet
           docker run --rm --network none "$IMAGE" python -c 'import os, ssl, torch, fastapi, uvicorn; assert os.getuid() == 10001; assert torch.version.cuda is None; assert ssl.create_default_context().get_ca_certs()'
           docker run --rm --network none "$IMAGE" ffmpeg -version

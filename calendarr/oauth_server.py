@@ -77,7 +77,12 @@ async def oauth_callback(request: Request) -> HTMLResponse:
 
 
 def _callback_path() -> str:
-    return urlparse(config.GOOGLE_REDIRECT_URI or "").path or DEFAULT_CALLBACK_PATH
+    if not config.GOOGLE_REDIRECT_URI:
+        return DEFAULT_CALLBACK_PATH
+    callback = urlparse(config.GOOGLE_REDIRECT_URI)
+    if callback.scheme not in {"http", "https"} or not callback.hostname:
+        raise ValueError("Задайте полный HTTP(S)-адрес в GOOGLE_REDIRECT_URI")
+    return callback.path or "/"
 
 
 async def health() -> PlainTextResponse:

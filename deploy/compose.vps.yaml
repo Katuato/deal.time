@@ -16,7 +16,7 @@ services:
 networks:
   caddy:
     external: true
-    name: ${DEAL_TIME_CADDY_NETWORK:-delu-caddy_default}
+    name: delu-caddy_default
   postgres:
     external: true
-    name: ${DEAL_TIME_POSTGRES_NETWORK:-delu-postgres_default}
+    name: delu-postgres_default

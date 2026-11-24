@@ -14,22 +14,17 @@ load_dotenv()
 
 
 def get_database_url() -> URL:
-    value = os.getenv("DATABASE_URL")
-    if not value:
-        credentials = os.getenv("db_logpass")
-        host = os.getenv("db_ipport")
-        if not credentials or not host:
-            raise RuntimeError("Задайте DATABASE_URL или db_logpass и db_ipport")
-        value = f"postgresql+asyncpg://{credentials}{host}/deal.time"
+    credentials = os.getenv("db_logpass")
+    host = os.getenv("db_ipport")
+    if not credentials or not host:
+        raise RuntimeError("Задайте db_logpass и db_ipport для PostgreSQL")
 
     try:
-        url = make_url(value)
+        url = make_url(f"postgresql+asyncpg://{credentials}{host}/deal.time")
     except (ArgumentError, ValueError):
         raise RuntimeError("Некорректный адрес PostgreSQL") from None
-    if url.drivername in {"postgres", "postgresql"}:
-        return url.set(drivername="postgresql+asyncpg")
-    if url.drivername != "postgresql+asyncpg":
-        raise RuntimeError("Для DATABASE_URL требуется PostgreSQL с драйвером asyncpg")
+    if not url.username or not url.host or url.database != "deal.time":
+        raise RuntimeError("Проверьте формат db_logpass и db_ipport")
     return url
 
 
@@ -127,6 +122,14 @@ class Operation(Base):
 
 async def check_database() -> None:
     async with engine.connect() as connection:
+        table_names = [*Base.metadata.tables, "alembic_version"]
+        tables_exist = await connection.scalar(sa.text(
+            "SELECT bool_and(to_regclass(table_name) IS NOT NULL) "
+            "FROM unnest(CAST(:table_names AS text[])) AS expected(table_name)"
+        ), {"table_names": table_names})
+        if not tables_exist:
+            raise RuntimeError("Выполните миграции базы данных")
+
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version LIMIT 1"))
         if revision is None:
             raise RuntimeError("Выполните миграции базы данных")

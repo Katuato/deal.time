@@ -68,3 +68,11 @@ def test_oauth_callback_requires_consent_before_saving_token(server):
         assert response.status_code == 403
         storage.save_user_token.assert_not_awaited()
         module.config.bot.send_message.assert_not_awaited()
+
+
+def test_oauth_redirect_without_path_uses_root_route(server):
+    module, _ = server
+    module.config.GOOGLE_REDIRECT_URI = "https://example.org"
+    with TestClient(module.create_app()) as client:
+        assert client.get("/").status_code == 400
+        assert client.get("/oauth2callback").status_code == 404

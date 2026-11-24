@@ -69,8 +69,8 @@ async def main():
 
     server = uvicorn.Server(uvicorn.Config(
         create_app(lifespan=lifespan),
-        host=os.getenv("OAUTH_HOST", "0.0.0.0"),
-        port=int(os.getenv("OAUTH_PORT", "8080")),
+        host=os.getenv("OAUTH_HOST") or "0.0.0.0",
+        port=int(os.getenv("OAUTH_PORT") or "8080"),
         workers=1,
         lifespan="on",
         access_log=False,

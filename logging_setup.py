@@ -1,5 +1,4 @@
 import logging
-import os
 import traceback
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
@@ -32,7 +31,7 @@ def _hide_exception_messages(record: logging.LogRecord) -> bool:
     return True
 
 
-def setup_logging(level: int = logging.INFO, log_dir: str = "logs") -> None:
+def setup_logging(level: int = logging.INFO, log_dir: str | None = None) -> None:
     old_factory = logging.getLogRecordFactory()
 
     def record_factory(*args, **kwargs):
@@ -44,7 +43,7 @@ def setup_logging(level: int = logging.INFO, log_dir: str = "logs") -> None:
     logging.setLogRecordFactory(record_factory)
 
     handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if os.getenv("LOG_TO_FILES", "1") != "0":
+    if log_dir is not None:
         path = Path(log_dir)
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         handlers.append(RotatingFileHandler(
