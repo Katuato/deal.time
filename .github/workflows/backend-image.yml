@@ -1,0 +1,64 @@
+name: Backend image
+
+on:
+  push:
+    branches: [deploy/alpine-stage-2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.14'
+      - name: Install test dependencies
+        run: |
+          sed -E -e '/ @ /d' -e 's/\[[^]]+\]//' requirements.txt > "$RUNNER_TEMP/backend-constraints.txt"
+          python -m pip install -c "$RUNNER_TEMP/backend-constraints.txt" -r calendarr/requirements.txt
+      - run: python -m pytest -c calendarr/pytest.ini calendarr/tests
+
+  publish:
+    needs: test
+    if: github.ref == 'refs/heads/deploy/alpine-stage-2'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$image" .
+          printf 'IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+
+      - name: Check image and Compose
+        env:
+          DEAL_TIME_ENV_FILE: .env.example
+        run: |
+          DEAL_TIME_IMAGE="$IMAGE" docker compose -f compose.yaml -f deploy/compose.vps.yaml --profile tools config --quiet
+          docker run --rm --network none "$IMAGE" python -c 'import os, ssl, torch, fastapi, uvicorn; assert os.getuid() == 10001; assert torch.version.cuda is None; assert ssl.create_default_context().get_ca_certs()'
+          docker run --rm --network none "$IMAGE" ffmpeg -version
+          docker run --rm --network none "$IMAGE" python -m alembic --version
+
+      - name: Publish commit image to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+          printf 'Published `%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"

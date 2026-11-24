@@ -1,0 +1,22 @@
+services:
+  bot:
+    image: ${DEAL_TIME_IMAGE:?Set DEAL_TIME_IMAGE to the published backend image}
+    build: !reset null
+    networks:
+      caddy:
+        aliases:
+          - delu-backend
+      postgres: {}
+
+  migrate:
+    image: ${DEAL_TIME_IMAGE:?Set DEAL_TIME_IMAGE to the published backend image}
+    networks:
+      - postgres
+
+networks:
+  caddy:
+    external: true
+    name: ${DEAL_TIME_CADDY_NETWORK:-delu-caddy_default}
+  postgres:
+    external: true
+    name: ${DEAL_TIME_POSTGRES_NETWORK:-delu-postgres_default}
