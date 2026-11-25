@@ -1,38 +1,28 @@
-# Mini App API contract
+# Что Mini App требует от сервера
 
-The interface uses same-origin `/api/v1` by default. Set `apiBaseUrl` in `config.js` to a public API origin when the API is hosted separately. Serve the Mini App and API over HTTPS.
+Mini App обращается к HTTPS API по адресу `/api/v1`. В каждом запросе передаёт `Authorization: tma <Telegram.WebApp.initData>`. Сервер проверяет подпись и срок действия этих данных и разрешает пользователю читать и менять только свои записи.
 
-Every request carries `Authorization: tma <Telegram.WebApp.initData>`. The server must validate the Telegram Web App signature and `auth_date`, identify the user from the validated payload, and authorize every resource against that user. Never trust a client-provided Telegram user ID. OAuth client secrets, bot tokens, and database passwords belong only in server-side environment variables.
+## Для открытия приложения
 
-All JSON responses below use UTF-8. Event dates use `YYYY-MM-DD`; times use `HH:mm` in the user's configured timezone. Errors should return `{ "error": { "message": "Human-readable message" } }`.
+| Запрос | Что вернуть |
+| --- | --- |
+| `GET /me` | Профиль пользователя, например `{"user":{"id":"123","timezone":"Europe/Moscow"}}`. |
+| `GET /events?limit=100` | Всю историю событий пользователя, включая созданные ботом. Формат страницы — `{"events":[…],"next_cursor":"…"}`. Следующую страницу фронт запрашивает с `&cursor=…`. В конце `next_cursor` равен `null` или отсутствует. Для пустой истории — `{"events":[]}`. |
 
-## Endpoints
+У события есть `id`, `title`, `date` (ГГГГ-ММ-ДД), `time` и `end` (ЧЧ:ММ в часовом поясе пользователя). Для фильтров и карточки передавайте `chatId`, `chat`, `source`, `repeat`, `status`, `sync`. Если есть, добавляйте `html_link` (ссылка на событие в Google Calendar), `seriesId`, `location`, `participants`, `timezone`, `description`.
 
-| Method | Path | Request | Response |
-| --- | --- | --- | --- |
-| GET | `/me` | — | `{ "user": { "id": "…", "timezone": "Europe/Moscow" } }` |
-| GET | `/events?from=YYYY-MM-DD&to=YYYY-MM-DD` | — | `{ "events": [Event] }` |
-| POST | `/events/parse` | `{ "message": "…" }` | `{ "event": Event }`; parses the text, saves the resulting event, and returns its canonical representation |
-| PATCH | `/events/{id}` | `{ "title", "date", "time", "end", "repeat" }` | `{ "event": Event }` |
-| DELETE | `/events/{id}` | — | `204 No Content` |
-| DELETE | `/events/{id}/series` | — | `204 No Content`; cancels the event series |
-| GET | `/tasks` | — | `{ "tasks": [Task] }` |
-| POST | `/tasks` | `{ "title", "date", "time" }` | `{ "task": Task }` |
-| PATCH | `/tasks/{id}` | `{ "done": true }` | `{ "task": Task }` |
-| DELETE | `/tasks/{id}` | — | `204 No Content` |
-| GET | `/notifications` | — | `{ "notifications": [Notification], "enabled": true }` |
-| PATCH | `/notifications/{id}` | `{ "unread": false }` | `{ "notification": Notification }` |
-| PUT | `/notifications/settings` | `{ "enabled": true }` | `{ "enabled": true }` |
-| GET | `/google/status` | — | `{ "connected": true }` |
-| POST | `/google/connect` | — | `{ "authorization_url": "https://…" }` |
-| DELETE | `/google/connection` | — | `204 No Content` |
+## Для действий и остальных экранов
 
-`Event` fields: `id`, `title`, `date`, `time`, `end`, `repeat`, `source`, `sync`, `chat`, `status`; optional `html_link`, `googleUrl`, and `seriesId`. `Task` fields: `id`, `title`, `date`, `time`, `done`. `Notification` fields: `id`, `title`, `text`, `extra`, `kind`, `unread`.
+| Запрос | Что требуется |
+| --- | --- |
+| `POST /events/parse` | Принять `message`, создать событие из текста и вернуть его в поле `event`. |
+| `PATCH /events/{id}` | Принять `title, date, time, end, repeat`, сохранить изменения и вернуть событие в поле `event`. |
+| `DELETE /events/{id}` · `DELETE /events/{id}/series` | Удалить разовое событие либо отменить всю серию. |
+| `GET /tasks` | Вернуть массив `tasks`. У задачи есть `id, title, date, time, done`. |
+| `POST /tasks` · `PATCH /tasks/{id}` · `DELETE /tasks/{id}` | Создать задачу по `title, date, time, done`, изменить отметку `done` или удалить задачу. При создании и изменении вернуть объект в поле `task`. |
+| `GET /notifications` | Вернуть массив `notifications` и переключатель `enabled` (true/false). Поля уведомления — `id, title, text, extra, kind, unread`. Для перехода к событию или задаче нужен `eventId` или `taskId`. |
+| `PATCH /notifications/{id}` · `PUT /notifications/settings` | Отметить уведомление прочитанным по `{"unread":false}` или сохранить настройку пользователя по `{"enabled":true}` либо `{"enabled":false}`. |
+| `GET /google/status` · `POST /google/connect` · `DELETE /google/connection` | Вернуть `connected` (true/false), выдать HTTPS-ссылку Google в поле `authorization_url` или отключить календарь. Синхронизацию событий с Google выполняет сервер. |
+| `GET /chats` | Вернуть `{"scope":"authorized","chats":[{"id":"19","title":"Рабочий чат"}]}`. Значения `scope`: `authorized` — доступ подтверждён, `observed` — из чата приходили сообщения, `unknown` — доступ неизвестен. |
 
-The events query is scoped to the requested inclusive date range. The calendar requests one month at a time; the history screen displays the events currently loaded by that query. A later API revision can add cursor-based history pagination if the dataset grows beyond what one range can return.
-
-The current bot branch has a Google OAuth callback but does not implement these Mini App JSON routes. This document defines the interface boundary; the Mini App reports API errors until the server implements it. Google OAuth must use the server-side web flow, configured HTTPS redirect URI, and server-held client credentials. Do not place Google credentials in this static frontend. The current UI supports one default Google Calendar and does not ask the user to choose among calendars.
-
-## Demo
-
-Append `?demo=1` to the Mini App URL to explicitly load the bundled sample data. In this mode data is local and Google/API actions are simulations. Without that parameter, the app starts in live mode and requires Telegram `initData` plus the API above.
+Ответы — JSON. При успешном удалении — HTTP 204 без тела. При ошибке — соответствующий HTTP-статус и `{"error":{"message":"Причина ошибки"}}`.
