@@ -7,6 +7,13 @@ def google_conn_kb():
     return kb.as_markup()
 
 
+def reconnect_kb():
+    """Кнопка при CalendarAuthError: токен отозван/устарел — ведёт на ту же OAuth-ссылку, что и подключение."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Переподключить календарь", callback_data="google_connect")
+    return kb.as_markup()
+
+
 # Часовые пояса России: подпись на кнопке -> IANA-название (его понимают и бот, и Google Календарь)
 TIMEZONES = [
     ("Калининград (UTC+2)", "Europe/Kaliningrad"),

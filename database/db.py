@@ -8,7 +8,8 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
-from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON, Index
+from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON, Index, Interval, CheckConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 
 load_dotenv()
 
@@ -94,13 +95,21 @@ class Event(Base):
     location = Column(String)
     starts_at = Column(DateTime)
     ends_at = Column(DateTime)
-    duration = Column(String)
+    duration = Column(Interval)  # timedelta, как "duration" в to_event_record NLP-модуля
     timezone = Column(String)
-    repeating = Column(String) #rrule
-    participants = Column(JSON)
-    status = Column(String)
+    rrule = Column(String)  # правило повторения RFC 5545, например FREQ=WEEKLY;BYDAY=MO
+    participants = Column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))  # [{"name": "Аня"}]
+    status = Column(String, nullable=False, default="draft", server_default="draft")
     confirmed_at = Column(DateTime)
-    google_event_id = Column(String)
+    google_event_id = Column(String, index=True)  # id события в Google Календаре после добавления
+
+    # draft — найдено, ждёт подтверждения (как status в to_event_record); queued — в очереди на
+    # добавление; confirmed — добавлено в Google; failed — воркер не смог добавить; declined —
+    # пользователь отказался; deleted — удалено из Google Календаря кнопкой «Удалить» / «Отменить серию»
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'queued', 'confirmed', 'failed', 'declined', 'deleted')",
+                        name="ck_events_status"),
+    )
 class Operation(Base):
     __tablename__ = 'operations'
     __table_args__ = (

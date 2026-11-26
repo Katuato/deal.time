@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from datetime import datetime
 from config import bot, logger
+from calendarr.calendar_connector import check_connection
+from calendarr.storage import DBTokenStorage
 from database.models import (
     accept_consent, add_buss_conn, add_user, edit_user, get_buss_conn, get_consent, get_user, has_active_consent,
 )
@@ -36,7 +38,7 @@ TZ_OTHER_PROMPT = ("Отправьте смещение от UTC, наприме
 
 def goto_settings_button():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Кнопка", url="tg://settings/edit/")
+    kb.button(text="Подключить", url="tg://settings/edit/")
     return kb.as_markup()
 
 async def message_buss_conn(user_id: int):
@@ -81,6 +83,42 @@ def timezone_title(tz: str) -> str:
     return f"{tz} ({utc})"
 
 
+def ready_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🕒 Сменить часовой пояс", callback_data="settings_tz")
+    kb.button(text="🔄 Переподключить календарь", callback_data="google_connect")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def send_ready(user_id: int):
+    '''/start, когда подключены и бизнес-бот, и Google Календарь: проверяем, что токен Google
+    живой, и показываем состояние подключения'''
+    result = await check_connection(user_id, DBTokenStorage())
+    if result.get("error_type") == "auth_error":
+        logger.info("/start: токен Google не работает у user_id=%s: %s", user_id, result.get("message"))
+        await bot.send_message(chat_id=user_id, text=(
+            "💬 Бот подключён к вашему аккаунту, но доступа к Google Календарю нет: "
+            "разрешение отозвано или устарело.\n\nПереподключите календарь — без этого события не попадут в него."),
+            reply_markup=keyb.reconnect_kb())
+        return
+
+    user = await get_user(user_id)
+    tz = timezone_title(user.timezone) if user and user.timezone else "не выбран — /timezone"
+    if result.get("status") == "success":
+        calendar = "📅 Google Календарь: подключён"
+    else:  # Google временно недоступен — токен проверить не смогли, но он есть
+        logger.warning("/start: не удалось проверить Google Календарь у user_id=%s: %s", user_id, result)
+        calendar = "📅 Google Календарь: подключён (сейчас не отвечает — события добавлю, когда он станет доступен)"
+    await bot.send_message(chat_id=user_id, reply_markup=ready_kb(), text=(
+        "Добро пожаловать в Telegram-ассистент <b>ДЕЛУ.ВРЕМЯ</b>\n✅ Всё подключено, бот работает.\n\n"
+        "💬 Бизнес-чаты: подключены\n"
+        f"{calendar}\n"
+        f"🕒 Часовой пояс: {tz}\n\n"
+        "Я читаю ваши переписки, нахожу договорённости о встречах и присылаю их сюда — "
+        "одной кнопкой событие попадает в календарь."))
+
+
 async def continue_setup(user_id: int):
     '''следующий шаг после согласия и часового пояса: подключение бота и google-календаря'''
     connection = await get_buss_conn(user_id)
@@ -89,24 +127,27 @@ async def continue_setup(user_id: int):
         return
     try:
         business = await bot.get_business_connection(business_connection_id=connection.business_token)
+        lost = not business.is_enabled  # бот убран из «Автоматизации чатов», но подключение ещё числится
     except Exception as e:
-        if "business connection not found" in str(e):
-            await bot.send_message(chat_id=user_id, text="Ваше подключение устарело/не найдено.\n"
-                                   "Нажмите кнопку ниже, перейдите в раздел 'Автоматизация чатов', и добавьте нашего бота: <code>@deluvremyabot</code>",
-                                   reply_markup=goto_settings_button())
-        else:
+        if "business connection not found" not in str(e):
             logger.warning("Не удалось проверить подключение Telegram Business (%s)", type(e).__name__)
             await bot.send_message(chat_id=user_id, text="Произошла непредвиденная ошибка.")
+            return
+        business, lost = None, True
+    if lost:
+        await bot.send_message(chat_id=user_id, text="Ваше подключение устарело/не найдено.\n"
+                               "Нажмите кнопку ниже, перейдите в раздел 'Автоматизация чатов', и добавьте нашего бота: <code>@deluvremyabot</code>",
+                               reply_markup=goto_settings_button())
         return
-    if not business.is_enabled or business.user.id != user_id:
+    if business.user.id != user_id:
         await message_buss_conn(user_id)
         return
+    if connection.status is None or connection.status is False:
+        await add_buss_conn(user_id=connection.user_id, business_token=connection.business_token, status=True)
     if connection.google_token is None:
         await bot.send_message(chat_id=user_id, text="Пожалуйста, свяжите бота с google-календарём", reply_markup=keyb.google_conn_kb())
     else:
-        await bot.send_message(chat_id=user_id, text="Добро пожаловать в Telegram-ассистент <b>ДЕЛУ.ВРЕМЯ</b>\n✅Бот запущен и готов к работе.")
-    if connection.status is None or connection.status is False:
-        await add_buss_conn(user_id=connection.user_id, business_token=connection.business_token, status=True)
+        await send_ready(user_id)
 
 
 async def send_privacy_policy(user_id: int) -> None:
@@ -182,6 +223,15 @@ async def command_timezone(msg: Message, state: FSMContext):
     user = await get_user(msg.from_user.id)
     current = f"Сейчас выбран: {timezone_title(user.timezone)}.\n\n" if user and user.timezone else ""
     await msg.answer(current + TZ_QUESTION, reply_markup=keyb.timezone_kb())
+
+
+@us.callback_query(F.data == "settings_tz")
+async def settings_timezone(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    user = await get_user(call.from_user.id)
+    current = f"Сейчас выбран: {timezone_title(user.timezone)}.\n\n" if user and user.timezone else ""
+    await call.answer()
+    await call.message.answer(current + TZ_QUESTION, reply_markup=keyb.timezone_kb())
 
 
 async def save_timezone(user_id: int, tz: str) -> bool:

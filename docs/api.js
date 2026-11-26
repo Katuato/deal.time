@@ -24,6 +24,9 @@
       if (response.status === 401) throw new Error('Не удалось подтвердить Telegram-сессию. Закройте и снова откройте Mini App.');
       throw new Error(message || `Ошибка сервера (${response.status}).`);
     }
+    if (response.status !== 204 && (!payload || typeof payload !== 'object')) {
+      throw new Error('Сервер вернул данные в неожиданном формате.');
+    }
     return payload;
   }
 
@@ -31,7 +34,25 @@
   window.DealenderApi = Object.freeze({
     request,
     me: () => request('/me'),
-    events: (from, to) => request(`/events?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    async allEvents() {
+      const events = new Map();
+      const cursors = new Set();
+      let cursor = '';
+      do {
+        const query = new URLSearchParams({limit: '100'});
+        if (cursor) query.set('cursor', cursor);
+        const page = await request('/events?' + query);
+        if (!Array.isArray(page.events)) throw new Error('Не удалось прочитать список событий.');
+        for (const event of page.events) events.set(String(event.id), event);
+        cursor = page.next_cursor;
+        if (cursor != null && (typeof cursor !== 'string' || !cursor || cursors.has(cursor))) {
+          throw new Error('Сервер вернул некорректную страницу истории.');
+        }
+        cursors.add(cursor);
+      } while (cursor);
+      return [...events.values()];
+    },
+    chats: () => request('/chats'),
     parseEvent: message => request('/events/parse', { method: 'POST', body: json({ message }) }),
     updateEvent: (eventId, patch) => request(`/events/${encodeURIComponent(eventId)}`, { method: 'PATCH', body: json(patch) }),
     deleteEvent: eventId => request(`/events/${encodeURIComponent(eventId)}`, { method: 'DELETE' }),

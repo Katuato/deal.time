@@ -396,3 +396,41 @@ async def delete_event(
         return _error_result("internal_error", "Внутренняя ошибка удаления события", True)
     finally:
         await _close_service(service)
+
+
+async def check_connection(
+    user_id: int,
+    token_storage: TokenStorageProtocol,
+) -> dict[str, Any]:
+    """Проверяет, что токен рабочий: лёгкий запрос к основному календарю
+    (events.list, maxResults=1 — хватает scope calendar.events).
+
+    Ответ в том же формате, что у create_event / delete_event:
+    {"status": "success"} или {"status": "error", "error_type", "message", "need_queue"},
+    где error_type="auth_error" — токена нет, он испорчен, отозван или устарел.
+    """
+    service = None
+    try:
+        service = await get_calendar_service(user_id=user_id, token_storage=token_storage)
+        req = service.events().list(calendarId=PRIMARY_CALENDAR_ID, maxResults=1)
+        try:
+            await asyncio.to_thread(_execute_request, req)
+        except HttpError as api_err:
+            if api_err.resp.status in (401, 403):  # доступ отозван в настройках Google-аккаунта
+                logger.warning("Google отклонил токен user_id=%s: %s", user_id, api_err)
+                return _error_result("auth_error", str(api_err), False)
+            raise
+        return {"status": "success"}
+
+    except CalendarAuthError as err:
+        return _error_result("auth_error", str(err), False)
+    except RefreshError as err:  # access-токен истёк во время запроса, а refresh_token отозван
+        logger.warning("Токен отозван/устарел у user_id=%s: %s", user_id, err)
+        return _error_result("auth_error", str(err), False)
+    except NETWORK_EXCEPTIONS as api_err:
+        return _api_error_result(api_err, f"при проверке подключения user_id={user_id}")
+    except Exception as err:  # noqa: BLE001
+        logger.exception("Внутренняя ошибка при проверке подключения user_id=%s", user_id)
+        return _error_result("internal_error", str(err), True)
+    finally:
+        await _close_service(service)

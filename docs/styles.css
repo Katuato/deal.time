@@ -31,3 +31,4 @@
 .access-mark{margin-left:auto;color:#df7471;font-size:16px;padding-right:8px}
 .btn:disabled{opacity:.55;cursor:not-allowed;box-shadow:none;transform:none}
 .app.dark .filter-popover-expanded input,.app.dark .filter-popover-expanded select,.app.dark .revoke-button{background:#18313c;color:#dffaff}
+.app [hidden]{display:none!important}.chat-row a{margin-left:auto;text-decoration:underline}.card a.btn{display:block;text-align:center;text-decoration:none}
