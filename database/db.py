@@ -8,7 +8,10 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
-from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON, Index, Interval, CheckConstraint, UniqueConstraint, text
+from sqlalchemy import (
+    BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer,
+    Interval, JSON, String, Time, UniqueConstraint, text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 
 load_dotenv()
@@ -103,6 +106,7 @@ class Event(Base):
     status = Column(String, nullable=False, default="draft", server_default="draft")
     confirmed_at = Column(DateTime)
     google_event_id = Column(String, index=True)  # id события в Google Календаре после добавления
+    google_html_link = Column(String)
 
     # draft — найдено, ждёт подтверждения (как status в to_event_record); queued — в очереди на
     # добавление; confirmed — добавлено в Google; failed — воркер не смог добавить; declined —
@@ -110,7 +114,26 @@ class Event(Base):
     __table_args__ = (
         CheckConstraint("status IN ('draft', 'queued', 'confirmed', 'failed', 'declined', 'deleted')",
                         name="ck_events_status"),
+        Index("ix_events_user_id_id", "user_id", "id"),
     )
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(120), nullable=False)
+    date = Column(Date, nullable=False)
+    time = Column(Time, nullable=False)
+    done = Column(Boolean, nullable=False, server_default=sa.false())
+
+
+class EventNoticeRead(Base):
+    __tablename__ = "event_notice_reads"
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True)
+    kind = Column(String, primary_key=True)
+
+
 class Operation(Base):
     __tablename__ = 'operations'
     __table_args__ = (

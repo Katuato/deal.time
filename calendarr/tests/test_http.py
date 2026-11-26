@@ -67,7 +67,7 @@ def test_oauth_callback_requires_consent_before_saving_token(server):
     module, storage = server
     module.has_active_consent.return_value = False
     with TestClient(module.create_app()) as client:
-        response = client.get("/oauth2callback", params={"code": "test-code", "state": "test-state"})
+        response = client.get("/oauthcallback", params={"code": "test-code", "state": "test-state"})
         assert response.status_code == 403
         storage.save_user_token.assert_not_awaited()
         module.config.bot.send_message.assert_not_awaited()
@@ -77,7 +77,7 @@ def test_oauth_respects_disabled_notifications(server):
     module, storage = server
     module.notifications_enabled.return_value = False
     with TestClient(module.create_app()) as client:
-        response = client.get("/oauth2callback", params={"code": "test-code", "state": "test-state"})
+        response = client.get("/oauthcallback", params={"code": "test-code", "state": "test-state"})
         assert response.status_code == 200
     storage.save_user_token.assert_awaited_once()
     module.config.bot.send_message.assert_not_awaited()
@@ -88,4 +88,19 @@ def test_oauth_redirect_without_path_uses_root_route(server):
     module.config.GOOGLE_REDIRECT_URI = "https://example.org"
     with TestClient(module.create_app()) as client:
         assert client.get("/").status_code == 400
+        assert client.get("/oauth2callback").status_code == 404
+
+
+def test_frontend_root_coexists_with_legacy_and_dedicated_oauth_callback(server, tmp_path):
+    module, _ = server
+    (tmp_path / "index.html").write_text("Mini App", encoding="utf-8")
+    module.config.GOOGLE_REDIRECT_URI = "https://example.org/"
+    with TestClient(module.create_app(frontend=tmp_path)) as client:
+        assert client.get("/").text == "Mini App"
+        assert client.get("/?error=access_denied").status_code == 400
+
+    module.config.GOOGLE_REDIRECT_URI = "https://example.org/oauthcallback"
+    with TestClient(module.create_app(frontend=tmp_path)) as client:
+        assert client.get("/").text == "Mini App"
+        assert client.get("/oauthcallback?error=access_denied").status_code == 400
         assert client.get("/oauth2callback").status_code == 404

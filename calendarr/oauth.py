@@ -52,6 +52,11 @@ def _pop_state(state: str) -> tuple[int, str | None]:
     return user_id, code_verifier
 
 
+def cancel_auth(user_id: int) -> None:
+    for key in [key for key, (owner, _, _) in _pending_states.items() if owner == user_id]:
+        _pending_states.pop(key, None)
+
+
 def _check_config() -> None:
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not GOOGLE_REDIRECT_URI:
         raise RuntimeError(

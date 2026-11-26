@@ -52,6 +52,8 @@ COPY database/*.py ./database/
 COPY modules/*.py ./modules/
 COPY tg_bot/*.py ./tg_bot/
 COPY tg_bot/privacy_policy.html ./tg_bot/
+COPY docs/index.html docs/styles.css docs/config.js docs/api.js docs/app.js ./miniapp/
+COPY docs/assets/logo.png ./miniapp/assets/
 
 USER app
 CMD ["python", "main.py"]

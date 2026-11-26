@@ -53,6 +53,20 @@ jobs:
           docker run --rm --network none "$IMAGE" python -c 'import os, ssl, torch, fastapi, uvicorn; assert os.getuid() == 10001; assert torch.version.cuda is None; assert ssl.create_default_context().get_ca_certs()'
           docker run --rm --network none "$IMAGE" ffmpeg -version
           docker run --rm --network none "$IMAGE" python -m alembic --version
+          docker run --rm -i --network none \
+            -e TOKEN=123456:ci -e db_logpass=ci:ci -e db_ipport=@127.0.0.1:5432 \
+            -e GOOGLE_REDIRECT_URI=https://example.com/oauthcallback "$IMAGE" python - <<'PY'
+          from pathlib import Path
+
+          from main import api, create_app
+
+          frontend = Path("miniapp")
+          files = ("index.html", "styles.css", "config.js", "api.js", "app.js", "assets/logo.png")
+          assert all((frontend / name).is_file() for name in files)
+          app = create_app(miniapp_api=api, frontend=frontend)
+          assert {"/healthz", "/oauthcallback", "/api/v1"} <= {route.path for route in app.routes}
+          assert {"/me", "/events"} <= {route.path for route in api.routes}
+          PY
 
       - name: Publish commit image to GHCR
         env:

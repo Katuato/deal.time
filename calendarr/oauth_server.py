@@ -3,10 +3,12 @@ import html
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 import config
 from calendarr import oauth
@@ -16,7 +18,7 @@ from database.models import has_active_consent, notifications_enabled
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CALLBACK_PATH = "/oauth2callback"
+DEFAULT_CALLBACK_PATH = "/oauthcallback"
 
 
 def _page(title: str, text: str, status: int = 200) -> HTMLResponse:
@@ -96,11 +98,23 @@ async def health() -> PlainTextResponse:
 
 def create_app(
     *, lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
+    miniapp_api: FastAPI | None = None, frontend: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(lifespan=lifespan, openapi_url=None, redirect_slashes=False)
     callback_path = _callback_path()
-    if callback_path == "/healthz":
-        raise ValueError("Путь Google OAuth не может совпадать с /healthz")
+    if callback_path in {"/healthz", "/api/v1"} or callback_path.startswith("/api/v1/"):
+        raise ValueError("Путь Google OAuth совпадает со служебным маршрутом")
     app.add_api_route("/healthz", health, methods=["GET", "HEAD"], include_in_schema=False)
-    app.add_api_route(callback_path, oauth_callback, methods=["GET"], include_in_schema=False)
+    if miniapp_api is not None:
+        app.mount("/api/v1", miniapp_api)
+    if callback_path == "/" and frontend is not None:
+        @app.get("/", include_in_schema=False)
+        async def legacy_oauth_or_frontend(request: Request):
+            if {"code", "state", "error"}.intersection(request.query_params):
+                return await oauth_callback(request)
+            return FileResponse(frontend / "index.html", headers={"Cache-Control": "no-cache"})
+    else:
+        app.add_api_route(callback_path, oauth_callback, methods=["GET"], include_in_schema=False)
+    if frontend is not None:
+        app.mount("/", StaticFiles(directory=frontend, html=True))
     return app

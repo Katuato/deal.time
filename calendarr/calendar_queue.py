@@ -50,11 +50,12 @@ async def _connector():
     return calendar_connector
 
 
-def _new_operation(
-    user_id: int, action: str, payload: dict[str, Any],
+def stage_operation(
+    session, user_id: int, action: str, payload: dict[str, Any],
     event_id: int | None, delay_seconds: int = 0,
 ) -> Operation:
-    return Operation(
+    """Add a calendar operation to the caller's database transaction."""
+    operation = Operation(
         event_id=event_id,
         action=action,
         data={**payload, "user_id": user_id},
@@ -62,6 +63,15 @@ def _new_operation(
         attempts=0,
         next_attempt_at=_utcnow() + timedelta(seconds=delay_seconds),
     )
+    session.add(operation)
+    return operation
+
+
+def stage_create(session, event: Event, event_data: dict[str, Any], **metadata) -> Operation:
+    event.status = "queued"
+    event.confirmed_at = _utcnow()
+    payload = {**metadata, "event_data": event_data, "google_event_id": uuid4().hex}
+    return stage_operation(session, event.user_id, "create", payload, event.id)
 
 
 async def enqueue_operation(
@@ -74,8 +84,7 @@ async def enqueue_operation(
 ) -> int:
     """action ∈ {'create','update','delete'}; payload см. в docstring модуля."""
     async with async_session.begin() as session:
-        op = _new_operation(user_id, action, payload, event_id, delay_seconds)
-        session.add(op)
+        op = stage_operation(session, user_id, action, payload, event_id, delay_seconds)
         await session.flush()
         op_id = op.id
     logger.info("В очередь поставлена операция id=%s", op_id)
@@ -97,14 +106,7 @@ async def confirm_event_and_enqueue(
         if event is None:
             return None
 
-        payload = {
-            "event_data": build_event_data(event),
-            "google_event_id": uuid4().hex,
-        }
-        event.status = "queued"
-        event.confirmed_at = _utcnow()
-        operation = _new_operation(user_id, "create", payload, event_id)
-        session.add(operation)
+        operation = stage_create(session, event, build_event_data(event))
         await session.flush()
         op_id = operation.id
     logger.info("Подтверждение события сохранено, операция id=%s", op_id)
@@ -136,7 +138,7 @@ async def claim_due_operations(limit: int = 10) -> list[Operation]:
 
 async def _finish(op_id: int, status: str, *, lease_until: datetime | None = None,
                   retry_in: float | None = None, count_attempt: bool = False,
-                  google_id: str | None = None) -> bool:
+                  google_id: str | None = None, html_link: str | None = None) -> bool:
     async with async_session.begin() as session:
         op = await session.get(Operation, op_id, with_for_update=True)
         if op is None:
@@ -151,8 +153,10 @@ async def _finish(op_id: int, status: str, *, lease_until: datetime | None = Non
         if retry_in is not None:
             op.next_attempt_at = _utcnow() + timedelta(seconds=retry_in)
 
-        if op.action == "create" and op.event_id is not None and status in (STATUS_DONE, STATUS_FAILED):
-            payload = op.data if isinstance(op.data, dict) else {}
+        payload = op.data if isinstance(op.data, dict) else {}
+        restore_deleted = op.action == "delete" and payload.get("miniapp") and status == STATUS_FAILED
+        finish_create = op.action == "create" and status in (STATUS_DONE, STATUS_FAILED)
+        if op.event_id is not None and (finish_create or restore_deleted):
             user_id = payload.get("user_id")
             if type(user_id) is not int:
                 return True
@@ -161,9 +165,13 @@ async def _finish(op_id: int, status: str, *, lease_until: datetime | None = Non
                 .with_for_update()
             )
             if event is not None:
-                if status == STATUS_DONE and google_id:
+                if restore_deleted and event.status == "deleted":
+                    event.status = payload.get("previous_status", "confirmed")
+                if finish_create and status == STATUS_DONE and google_id:
                     event.google_event_id = google_id
-                if payload.get("google_event_id") and event.status == "queued":
+                    if html_link:
+                        event.google_html_link = html_link
+                if finish_create and payload.get("google_event_id") and event.status == "queued":
                     event.status = "confirmed" if status == STATUS_DONE else "failed"
     return True
 
@@ -196,22 +204,18 @@ async def _postpone(op: Operation) -> bool:
                          retry_in=POSTPONE_SECONDS)
 
 
-async def _create_pending_before(op: Operation) -> bool:
-    """Есть ли незавершённый create того же события с меньшим id."""
+async def _operation_pending_before(op: Operation) -> bool:
+    """Keep Mini App writes in order, including retries of an older operation."""
     if op.event_id is None:
         return False
+    statement = select(Operation.id).where(
+        Operation.event_id == op.event_id, Operation.id < op.id,
+        Operation.status.in_([STATUS_PENDING, STATUS_PROCESSING]),
+    )
+    if not (op.data or {}).get("miniapp"):
+        statement = statement.where(Operation.action == "create")
     async with async_session() as session:
-        found = (
-            await session.execute(
-                select(Operation.id).where(
-                    Operation.event_id == op.event_id,
-                    Operation.action == "create",
-                    Operation.id < op.id,
-                    Operation.status.in_([STATUS_PENDING, STATUS_PROCESSING]),
-                ).limit(1)
-            )
-        ).first()
-    return found is not None
+        return await session.scalar(statement.limit(1)) is not None
 
 
 async def _lookup_google_id(user_id: int, event_id: int) -> str | None:
@@ -263,7 +267,7 @@ async def process_pending_calendar_operations(storage, limit: int = 10,
         payload = op.data or {}
 
         # порядок: update/delete не должны опережать create того же события
-        if action in ("update", "delete") and await _create_pending_before(op):
+        if action in ("update", "delete") and await _operation_pending_before(op):
             stats["postponed"] += await _postpone(op)
             continue
 
@@ -304,8 +308,9 @@ async def process_pending_calendar_operations(storage, limit: int = 10,
             if action == "create":
                 result = await connector.create_event(user_id, storage, event_data)
             elif action == "update":
+                changes = {key: payload[key] for key in ("summary", "recurrence") if key in payload}
                 result = await connector.update_event_time(
-                    user_id, storage, google_id, new_start, new_end, timezone=tz_name
+                    user_id, storage, google_id, new_start, new_end, timezone=tz_name, **changes,
                 )
             else:
                 result = await connector.delete_event(user_id, storage, google_id)
@@ -321,7 +326,8 @@ async def process_pending_calendar_operations(storage, limit: int = 10,
 
         if result.get("status") == "success":
             google_id = result.get("event_id") or payload.get("google_event_id")
-            if await _finish(op_id, STATUS_DONE, lease_until=op.next_attempt_at, google_id=google_id):
+            if await _finish(op_id, STATUS_DONE, lease_until=op.next_attempt_at, google_id=google_id,
+                             html_link=result.get("html_link")):
                 stats["success"] += 1
                 await _report(on_result, op, "done", result)
         elif result.get("need_queue"):

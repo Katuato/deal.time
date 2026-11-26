@@ -2,12 +2,14 @@ import asyncio
 import logging
 import os
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from aiogram import Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from calendarr.calendar_queue import run_worker
+from calendarr.miniapp_api import api
 from calendarr.oauth_server import create_app
 from calendarr.storage import DBTokenStorage
 from config import bot
@@ -70,8 +72,11 @@ async def main():
                         polling.cancel()
                 await asyncio.gather(worker, polling, return_exceptions=True)
 
+    frontend = Path(__file__).with_name("miniapp")
+    if not frontend.is_dir():
+        frontend = Path(__file__).with_name("docs")
     server = uvicorn.Server(uvicorn.Config(
-        create_app(lifespan=lifespan),
+        create_app(lifespan=lifespan, miniapp_api=api, frontend=frontend),
         host=os.getenv("OAUTH_HOST") or "0.0.0.0",
         port=int(os.getenv("OAUTH_PORT") or "8080"),
         workers=1,

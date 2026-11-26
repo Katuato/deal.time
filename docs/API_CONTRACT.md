@@ -26,3 +26,15 @@ Mini App обращается к HTTPS API по адресу `/api/v1`. В ка�
 | `GET /chats` | Вернуть `{"scope":"authorized","chats":[{"id":"19","title":"Рабочий чат"}]}`. Значения `scope`: `authorized` — доступ подтверждён, `observed` — из чата приходили сообщения, `unknown` — доступ неизвестен. |
 
 Ответы — JSON. При успешном удалении — HTTP 204 без тела. При ошибке — соответствующий HTTP-статус и `{"error":{"message":"Причина ошибки"}}`.
+
+## Развёртывание на VPS
+
+1. Добавьте `https://app.delyvremya.online/oauthcallback` в список разрешённых адресов перенаправления OAuth-клиента в Google Cloud.
+2. Запишите тот же адрес в `GOOGLE_REDIRECT_URI` в `/srv/delu-vremya/backend/.env`.
+3. `bash deploy/backend.sh update COMMIT_SHA` — обновляет образ с фронтендом и API и применяет миграции. Перед релизом с миграциями сохраните резервную копию базы.
+4. Замените блок `app.delyvremya.online` в `/srv/delu-vremya/caddy/Caddyfile` содержимым `deploy/Caddyfile.miniapp`. Сохраните верхний блок `servers` с настройками `h1 h2`.
+5. `docker exec delu-caddy-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` — проверяет конфигурацию.
+6. `docker exec delu-caddy-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile` — применяет конфигурацию.
+7. `curl -i https://app.delyvremya.online/api/v1/me` — проверяет доступность API. Без Telegram-сессии ожидается `401`. В открытом из Telegram Mini App должны загрузиться профиль и события.
+
+На одном домене `/` отдаёт Mini App, `/api/v1/*` обслуживает его запросы, а `/oauthcallback` принимает ответ Google. Backend остаётся в сети Docker через `delu-backend:8080`. Сессия Mini App действует один час с момента открытия.

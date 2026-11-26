@@ -25,3 +25,12 @@ modules/**
 tg_bot/**
 !tg_bot/*.py
 !tg_bot/privacy_policy.html
+!docs/
+docs/**
+!docs/index.html
+!docs/styles.css
+!docs/config.js
+!docs/api.js
+!docs/app.js
+!docs/assets/
+!docs/assets/logo.png

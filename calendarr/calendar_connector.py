@@ -107,7 +107,15 @@ async def get_calendar_service(user_id: int, token_storage: TokenStorageProtocol
             try:
                 logger.info("Обновление истёкшего токена для user_id=%s", user_id)
                 await asyncio.to_thread(_refresh_credentials, creds)
-                await token_storage.save_user_token(user_id, json.loads(creds.to_json()))
+                fresh = json.loads(creds.to_json())
+                refresh = getattr(token_storage, "refresh_user_token", None)
+                if refresh is None:
+                    await token_storage.save_user_token(user_id, fresh)
+                elif not await refresh(user_id, token_data, fresh):
+                    current = await token_storage.get_user_token(user_id)
+                    if not current or current.get("refresh_token") != token_data.get("refresh_token"):
+                        raise CalendarAuthError("Google Календарь был отключён или переподключён. Повторите запрос.")
+                    creds = Credentials.from_authorized_user_info(current, SCOPES)
             except RefreshError as err:
                 logger.error("Токен отозван или устарел у user_id=%s", user_id)
                 raise CalendarAuthError(
@@ -330,6 +338,9 @@ async def update_event_time(
     new_start_time: str,
     new_end_time: str,
     timezone: str = DEFAULT_TIMEZONE,
+        *,
+        summary: str | None = None,
+        recurrence: list[str] | None = None,
 ) -> dict[str, Any]:
     """F-B-17, F-M-11. ВНИМАНИЕ: PATCH применяется ко всей серии повторений."""
     service = None
@@ -343,6 +354,10 @@ async def update_event_time(
             "start": {"dateTime": new_start_time, "timeZone": timezone},
             "end": {"dateTime": new_end_time, "timeZone": timezone},
         }
+        if summary is not None:
+            patch_body["summary"] = summary
+        if recurrence is not None:
+            patch_body["recurrence"] = recurrence
         req = service.events().patch(
             calendarId=PRIMARY_CALENDAR_ID, eventId=event_id, body=patch_body
         )

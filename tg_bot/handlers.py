@@ -426,7 +426,7 @@ def _with_reconnect(markup):
 async def notify_queue_result(op: dict, outcome: str, result: dict) -> None:
     """Колбэк воркера очереди (run_worker(on_result=...)): операция из очереди выполнена
     или окончательно не удалась — обновляем статус события и сообщаем пользователю."""
-    if op["action"] not in ("create", "delete") or op["event_id"] is None:
+    if op["data"].get("miniapp") or op["action"] not in ("create", "delete") or op["event_id"] is None:
         return
     ev = await get_event(op["event_id"])
     if ev is None:

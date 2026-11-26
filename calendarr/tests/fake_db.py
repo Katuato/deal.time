@@ -24,6 +24,7 @@ def build_fake_db() -> types.ModuleType:
         status = Column(String)
         confirmed_at = Column(DateTime)
         google_event_id = Column(String)
+        google_html_link = Column(String)
 
     class Operation(Base):
         __tablename__ = "operations"

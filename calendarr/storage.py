@@ -32,7 +32,8 @@ class DBTokenStorage:
         if not row:
             return None
         try:
-            return json.loads(row)
+            token = json.loads(row)
+            return token if isinstance(token, dict) else None
         except (TypeError, ValueError):
             logger.error("Некорректный формат сохранённого Google-токена user_id=%s", user_id)
             return None
@@ -53,6 +54,15 @@ class DBTokenStorage:
                 await session.rollback()
                 logger.error("Не удалось сохранить Google-токен user_id=%s (%s)", user_id, type(err).__name__)
                 raise
+
+    async def refresh_user_token(self, user_id: int, previous: dict[str, Any], token_data: dict[str, Any]) -> bool:
+        """A refresh in flight cannot restore a disconnected or replaced Google grant."""
+        async with async_session.begin() as session:
+            connection = await session.scalar(select(Connection).where(Connection.user_id == user_id).with_for_update())
+            if connection is None or not connection.google_token or json.loads(connection.google_token) != previous:
+                return False
+            connection.google_token = json.dumps(token_data, ensure_ascii=False)
+            return True
 
     @staticmethod
     async def _upsert(session, user_id: int, payload: str) -> None:
