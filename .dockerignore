@@ -24,3 +24,4 @@ modules/**
 !tg_bot/
 tg_bot/**
 !tg_bot/*.py
+!tg_bot/privacy_policy.html

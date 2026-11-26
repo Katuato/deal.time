@@ -2,7 +2,8 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 
 from database.db import async_session, Consent, User, Connection, Chat, Event, Operation
 
@@ -93,6 +94,27 @@ async def get_consent(user_id: int):
 async def has_active_consent(user_id: int) -> bool:
     consent = await get_consent(user_id)
     return consent is not None and consent.accepted_at is not None and consent.revoked_at is None
+
+
+async def accept_consent(user_id: int, policy_version: str, accepted_at: datetime) -> bool | None:
+    """Сохраняет согласие и создаёт профиль в одной транзакции."""
+    try:
+        async with async_session.begin() as session:
+            await session.execute(
+                insert(User).values(user_id=user_id).on_conflict_do_nothing(index_elements=[User.user_id])
+            )
+            statement = insert(Consent).values(user_id=user_id, policy_version=policy_version,
+                                               accepted_at=accepted_at, revoked_at=None)
+            result = await session.execute(statement.on_conflict_do_update(
+                index_elements=[Consent.user_id],
+                set_={"policy_version": policy_version, "accepted_at": accepted_at, "revoked_at": None},
+                where=or_(Consent.policy_version.is_distinct_from(policy_version),
+                          Consent.accepted_at.is_(None), Consent.revoked_at.is_not(None)),
+            ))
+            return result.rowcount > 0
+    except Exception:
+        logger.exception("Ошибка сохранения согласия (user_id=%s)", user_id)
+        return None
 
 
 async def add_consent(user_id: int, policy_version: str, accepted_at: datetime,

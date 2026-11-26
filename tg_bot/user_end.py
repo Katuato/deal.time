@@ -1,18 +1,27 @@
-import html
 import re
+from hashlib import sha256
+from pathlib import Path
+
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InputRichMessage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from datetime import datetime
 from config import bot, logger
-from database.models import add_user, get_user, edit_user, add_consent, has_active_consent, edit_consent, get_buss_conn, add_buss_conn
+from database.models import (
+    accept_consent, add_buss_conn, add_user, edit_user, get_buss_conn, get_consent, get_user, has_active_consent,
+)
 import tg_bot.keyboards as keyb
 us = Router()
+
+POLICY_HTML = Path(__file__).with_name("privacy_policy.html").read_text(encoding="utf-8")
+POLICY_VERSION = "consent-" + sha256(POLICY_HTML.encode("utf-8")).hexdigest()[:24]
+CONSENT_CALLBACK = f"user_consent_accept:{POLICY_VERSION}"
 
 
 class TimezoneInput(StatesGroup):
@@ -100,17 +109,33 @@ async def continue_setup(user_id: int):
         await add_buss_conn(user_id=connection.user_id, business_token=connection.business_token, status=True)
 
 
+async def send_privacy_policy(user_id: int) -> None:
+    consent = await get_consent(user_id)
+    accepted = (consent is not None and consent.policy_version == POLICY_VERSION
+                and consent.accepted_at is not None and consent.revoked_at is None)
+    reply_markup = None
+    if not accepted:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Даю согласие", callback_data=CONSENT_CALLBACK)
+        reply_markup = kb.as_markup()
+    await bot.send_rich_message(
+        chat_id=user_id,
+        rich_message=InputRichMessage(
+            html="<h2>Согласие на обработку персональных данных</h2>"
+                 f"<details><summary>Читать полный текст согласия</summary>{POLICY_HTML}</details>",
+        ),
+        reply_markup=reply_markup,
+    )
+
+
 @us.message(CommandStart())
 async def command_start(msg: Message, state: FSMContext):
     await state.clear()
     if not await has_active_consent(msg.from_user.id):
-        kb = InlineKeyboardBuilder()
-        kb.button(text="Разрешаю обработку сообщений", callback_data="user_consent_accept")
-        await msg.answer(f"Здравствуйте, {html.escape(msg.from_user.full_name)}!\n\n"
-                        "Бот обрабатывает текстовые и голосовые сообщения из выбранных вами чатов "
-                        "Telegram Business, чтобы предлагать события. Подтверждённые события передаются "
-                        "в подключённый Google Календарь. Доступ к переписке можно выключить в Telegram Business.",
-                        reply_markup=kb.as_markup())
+        if msg.chat.type != "private":
+            await msg.answer("Откройте личный чат с ботом и отправьте /start.")
+            return
+        await send_privacy_policy(msg.from_user.id)
         return
     user = await get_user(msg.from_user.id)
     if user is None or not user.timezone:
@@ -120,24 +145,35 @@ async def command_start(msg: Message, state: FSMContext):
         return
     await continue_setup(msg.from_user.id)
 
-@us.callback_query(F.data=="user_consent_accept")
+@us.callback_query(F.data == "user_consent_accept")
+@us.callback_query(F.data.startswith("user_consent_accept:"))
 async def user_consent_accept(call: CallbackQuery):
+    if (not isinstance(call.message, Message) or call.message.chat.type != "private"
+            or call.message.chat.id != call.from_user.id):
+        await call.answer("Подтвердите согласие в личном чате с ботом.", show_alert=True)
+        return
+    if call.data != CONSENT_CALLBACK:
+        await call.answer("Текст согласия обновился.")
+        await send_privacy_policy(call.from_user.id)
+        return
     date = datetime.now(tz=ZoneInfo("Europe/Moscow")).replace(tzinfo=None, microsecond=0)
-    result = await edit_consent(user_id=call.from_user.id, policy_version="business-messages-v1",
-                                accepted_at=date, revoked_at=None)
+    result = await accept_consent(call.from_user.id, POLICY_VERSION, date)
+    if result is None:
+        await call.answer("Не удалось сохранить согласие. Попробуйте ещё раз.", show_alert=True)
+        return
     if result is False:
-        result = await add_consent(user_id=call.from_user.id, policy_version="business-messages-v1", accepted_at=date)
-        if result is False:
-            await call.answer("Не удалось записать информацию о вашем согласии. Пожалуйста, обратитесь в поддержку", show_alert=True)
-            return False
-    await add_user(user_id=call.from_user.id)
+        await call.answer("Согласие уже сохранено.")
+        return
     await call.answer("✅ Согласие сохранено")
+    try:
+        await call.message.delete_reply_markup()
+    except TelegramBadRequest:
+        logger.info("Не удалось убрать кнопку согласия")
     user = await get_user(call.from_user.id)
     if user is not None and user.timezone:
-        await call.message.delete_reply_markup()
         await continue_setup(call.from_user.id)
         return
-    await call.message.edit_text(TZ_QUESTION, reply_markup=keyb.timezone_kb())
+    await call.message.answer(TZ_QUESTION, reply_markup=keyb.timezone_kb())
 
 
 @us.message(Command("timezone"))

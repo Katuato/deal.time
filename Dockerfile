@@ -51,6 +51,7 @@ COPY calendarr/*.py ./calendarr/
 COPY database/*.py ./database/
 COPY modules/*.py ./modules/
 COPY tg_bot/*.py ./tg_bot/
+COPY tg_bot/privacy_policy.html ./tg_bot/
 
 USER app
 CMD ["python", "main.py"]
