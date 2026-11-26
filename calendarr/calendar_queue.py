@@ -14,9 +14,9 @@ claim_due_operations (FOR UPDATE SKIP LOCKED + lease). После истечен
 """
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 from sqlalchemy import or_, select
@@ -91,7 +91,7 @@ async def confirm_event_and_enqueue(
     async with async_session.begin() as session:
         event = await session.scalar(
             select(Event)
-            .where(Event.id == event_id, Event.user_id == user_id, Event.status == "waiting")
+            .where(Event.id == event_id, Event.user_id == user_id, Event.status == "draft")
             .with_for_update()
         )
         if event is None:
@@ -231,7 +231,28 @@ async def _save_google_id(user_id: int, event_id: int, google_id: str) -> None:
             await session.commit()
 
 
-async def process_pending_calendar_operations(storage, limit: int = 10) -> dict[str, int]:
+# Колбэк об окончательном результате операции: on_result(op, outcome, result), где
+#   op      — {"id", "action", "event_id", "user_id", "data"}
+#   outcome — "done" или "failed" (повторов больше не будет)
+#   result  — ответ calendar_connector ({"status", "error_type", "message", ...})
+OnResult = Callable[[dict, str, dict], Awaitable[None]]
+
+
+async def _report(on_result: Optional[OnResult], op: Operation, outcome: str, result: dict) -> None:
+    """Сообщает об окончательном результате; ошибка колбэка не ломает воркер."""
+    if on_result is None:
+        return
+    payload = op.data if isinstance(op.data, dict) else {}
+    info = {"id": op.id, "action": op.action, "event_id": op.event_id,
+            "user_id": payload.get("user_id"), "data": payload}
+    try:
+        await on_result(info, outcome, result)
+    except Exception as err:  # noqa: BLE001
+        logger.error("Ошибка колбэка on_result для operation id=%s (%s)", op.id, type(err).__name__)
+
+
+async def process_pending_calendar_operations(storage, limit: int = 10,
+                                              on_result: Optional[OnResult] = None) -> dict[str, int]:
     """Один проход воркера. Возвращает статистику."""
     connector = await _connector()
     stats = {"processed": 0, "success": 0, "retry": 0, "failed": 0, "postponed": 0}
@@ -271,9 +292,12 @@ async def process_pending_calendar_operations(storage, limit: int = 10) -> dict[
                     tz_name = payload.get("timezone", "Europe/Moscow")
             else:
                 raise ValueError(f"неизвестный action={action}")
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, ValueError, TypeError) as err:
             logger.error("Operation id=%s: некорректный payload", op_id)
-            stats["failed"] += await _finish(op_id, STATUS_FAILED, lease_until=op.next_attempt_at)
+            if await _finish(op_id, STATUS_FAILED, lease_until=op.next_attempt_at):
+                stats["failed"] += 1
+                await _report(on_result, op, "failed", {"status": "error", "error_type": "bad_payload",
+                                                         "message": str(err)})
             continue
 
         try:
@@ -290,19 +314,27 @@ async def process_pending_calendar_operations(storage, limit: int = 10) -> dict[
             outcome = await _retry_later(op)
             if outcome:
                 stats[outcome] += 1
+            if outcome == "failed":
+                await _report(on_result, op, "failed", {"status": "error", "error_type": "exception",
+                                                         "message": type(err).__name__})
             continue
 
         if result.get("status") == "success":
             google_id = result.get("event_id") or payload.get("google_event_id")
-            stats["success"] += await _finish(op_id, STATUS_DONE, lease_until=op.next_attempt_at,
-                                             google_id=google_id)
+            if await _finish(op_id, STATUS_DONE, lease_until=op.next_attempt_at, google_id=google_id):
+                stats["success"] += 1
+                await _report(on_result, op, "done", result)
         elif result.get("need_queue"):
             outcome = await _retry_later(op)
             if outcome:
                 stats[outcome] += 1
+            if outcome == "failed":
+                await _report(on_result, op, "failed", result)
         else:
             logger.error("Operation id=%s: окончательная ошибка Google Calendar", op_id)
-            stats["failed"] += await _finish(op_id, STATUS_FAILED, lease_until=op.next_attempt_at)
+            if await _finish(op_id, STATUS_FAILED, lease_until=op.next_attempt_at):
+                stats["failed"] += 1
+                await _report(on_result, op, "failed", result)
 
     return stats
 
@@ -347,19 +379,33 @@ async def create_event_or_enqueue(
     return result
 
 
-async def run_worker(storage, interval_seconds: float = 30.0) -> None:
-    """Бесконечный цикл воркера; завершается по CancelledError."""
+_wakeup = asyncio.Event()
+
+
+def wake_worker() -> None:
+    """Будит воркер раньше интервала — например, сразу после постановки события в очередь."""
+    _wakeup.set()
+
+
+async def run_worker(storage, interval_seconds: float = 30.0,
+                     on_result: Optional[OnResult] = None) -> None:
+    """Бесконечный цикл воркера; завершается по CancelledError.
+    on_result — колбэк об окончательном результате операции (например, уведомление пользователю)."""
     logger.info("Воркер очереди календаря запущен (интервал %ss)", interval_seconds)
     try:
         while True:
             try:
-                stats = await process_pending_calendar_operations(storage)
+                stats = await process_pending_calendar_operations(storage, on_result=on_result)
                 if stats["processed"]:
                     logger.info("Очередь календаря: %s", stats)
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001
                 logger.error("Ошибка итерации воркера очереди календаря (%s)", type(err).__name__)
-            await asyncio.sleep(interval_seconds)
+            try:
+                await asyncio.wait_for(_wakeup.wait(), timeout=interval_seconds)
+            except TimeoutError:
+                pass
+            _wakeup.clear()
     except asyncio.CancelledError:
         logger.info("Воркер очереди календаря остановлен")

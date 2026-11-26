@@ -13,7 +13,7 @@ from calendarr.storage import DBTokenStorage
 from config import bot
 from database.db import check_database, engine, get_token_cipher
 from logging_setup import LoggingContextMiddleware, setup_logging
-from tg_bot.handlers import initialize_stt, rt
+from tg_bot.handlers import initialize_stt, notify_queue_result, rt
 from tg_bot.user_end import us
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,8 @@ async def main():
             await check_database()
             await initialize_stt()
 
-            worker = asyncio.create_task(run_worker(DBTokenStorage()), name="calendar worker")
+            worker = asyncio.create_task(run_worker(DBTokenStorage(), on_result=notify_queue_result),
+                                         name="calendar worker")
             polling = asyncio.create_task(
                 dp.start_polling(bot, handle_signals=False, close_bot_session=False),
                 name="Telegram polling",

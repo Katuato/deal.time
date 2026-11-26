@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from calendarr.calendar_queue import confirm_event_and_enqueue
+from calendarr.calendar_queue import confirm_event_and_enqueue, enqueue_operation, wake_worker
 from calendarr.nlp_adapter import build_event_data
 from calendarr.oauth import build_auth_url
 from config import bot, logger
@@ -180,12 +180,58 @@ def _to_naive(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value).replace(tzinfo=None)
 
 
+_RRULE_DAYS = {"MO": "понедельник", "TU": "вторник", "WE": "среду", "TH": "четверг",
+               "FR": "пятницу", "SA": "субботу", "SU": "воскресенье"}
+_RRULE_FREQ = {  # (интервал 1, интервал N)
+    "DAILY": ("Каждый день", "Каждые {n} дн."),
+    "WEEKLY": ("Каждую неделю", "Каждые {n} нед."),
+    "MONTHLY": ("Каждый месяц", "Каждые {n} мес."),
+    "YEARLY": ("Каждый год", "Каждые {n} г."),
+}
+
+
+def _describe_rrule(rrule: str, starts_at: datetime | None, ends_at: datetime | None) -> str | None:
+    """FREQ=WEEKLY;BYDAY=MO + 20:00–22:00 -> «Каждую неделю в понедельник с 20:00 до 22:00»."""
+    parts = dict(p.split("=", 1) for p in rrule.split(";") if "=" in p)
+    names = _RRULE_FREQ.get(parts.get("FREQ", ""))
+    if names is None:
+        return None
+    n = int(parts.get("INTERVAL", "1") or 1)
+    text = names[0] if n == 1 else names[1].format(n=n)
+
+    days = [d for d in parts.get("BYDAY", "").split(",") if d in _RRULE_DAYS]
+    if days == ["MO", "TU", "WE", "TH", "FR"]:
+        text += " по будням"
+    elif days == ["SA", "SU"]:
+        text += " по выходным"
+    elif days:
+        names_ = [_RRULE_DAYS[d] for d in days]
+        joined = names_[0] if len(names_) == 1 else ", ".join(names_[:-1]) + " и " + names_[-1]
+        prep = "во" if days[0] == "TU" else "в"
+        text += f" {prep} {joined}"
+    elif parts["FREQ"] == "MONTHLY" and starts_at:
+        text += f" {starts_at.day}-го числа"
+    elif parts["FREQ"] == "YEARLY" and starts_at:
+        text += f" {starts_at.strftime('%d.%m')}"
+
+    if starts_at:
+        if ends_at and ends_at.date() == starts_at.date():
+            text += f' с {starts_at.strftime("%H:%M")} до {ends_at.strftime("%H:%M")}'
+        else:
+            text += f' в {starts_at.strftime("%H:%M")}'
+        text += f' (начиная с {starts_at.strftime("%d.%m.%Y")})'
+    return text
+
+
 def _event_card(ev) -> list[str]:
     """Строки карточки события по записи из БД."""
     lines = []
     if ev.title:
         lines.append(f'📌 {html.escape(ev.title)}')
-    if ev.starts_at:
+    repeat = _describe_rrule(ev.rrule, ev.starts_at, ev.ends_at) if ev.rrule else None
+    if repeat:
+        lines.append(f'🔁 {html.escape(repeat)}')
+    elif ev.starts_at:
         lines.append(f'🕒 {ev.starts_at.strftime("%d.%m.%Y в %H:%M")}')
     if ev.location:
         lines.append(f'📍 {html.escape(ev.location)}')
@@ -194,11 +240,12 @@ def _event_card(ev) -> list[str]:
 
 def _card_text(ev) -> str:
     status = {
-        "waiting": "Выберите действие:",
+        "draft": "Выберите действие:",
         "queued": "⏳ Событие в очереди на добавление в Google Календарь.",
         "confirmed": "✅ Событие добавлено в Google Календарь.",
         "failed": "⚠️ Не удалось добавить событие в Google Календарь.",
         "declined": "❌ Событие не добавлено.",
+        "deleted": "🗑 Событие удалено из Google Календаря.",
     }
     return '\n'.join(["Событие:", *_event_card(ev), status.get(ev.status, "Статус недоступен.")])
 
@@ -246,15 +293,15 @@ async def new_event(answ, user_id, chat_id, user_tz):
     if rec is None:  # не create или статус не ok — сюда не должно попадать
         logger.warning("new_event: NLP-результат не подходит для создания события")
         return
-    # колонки БД: время без пояса, длительность — строка с минутами, статус до подтверждения — waiting
+    # колонки events повторяют to_event_record; время храним без пояса (пояс — в колонке timezone)
     event_id = await add_event(
         user_id=user_id, chat_id=chat_id, title=rec["title"],
         starts_at=_to_naive(rec["starts_at"]), ends_at=_to_naive(rec["ends_at"]),
-        duration=str(int(rec["duration"].total_seconds() // 60)) if rec["duration"] else None,
+        duration=rec["duration"],
         timezone=rec["timezone"], location=rec["location"],
-        participants=rec["participants"] or None,
-        repeating=rec["rrule"],
-        status="waiting",
+        participants=rec["participants"],
+        rrule=rec["rrule"],
+        status=rec["status"],
     )
     if event_id is None:
         await bot.send_message(chat_id=user_id, text="Не удалось сохранить новое событие. Попробуйте позже.")
@@ -275,16 +322,16 @@ def _calendar_event_data(ev):
         summary=ev.title,
         start_time=ev.starts_at.isoformat(),
         end_time=ev.ends_at.isoformat() if ev.ends_at else None,
-        duration_minutes=int(ev.duration) if ev.duration and ev.duration.isdigit() else None,
+        duration_minutes=int(ev.duration.total_seconds() // 60) if ev.duration else None,
         timezone=ev.timezone or DEFAULT_TZ,
         attendees=[p.get("name") for p in ev.participants or [] if p.get("name")],
         location=ev.location,
-        rrule=ev.repeating,
+        rrule=ev.rrule,
     )
 
 
 async def _add_to_calendar(call: types.CallbackQuery, ev):
-    if ev.status != "waiting":
+    if ev.status != "draft":
         await call.answer("Событие уже обработано.", show_alert=True)
         return
     if not ev.starts_at:
@@ -308,10 +355,149 @@ async def _add_to_calendar(call: types.CallbackQuery, ev):
         await call.answer("Событие уже обработано.", show_alert=True)
         return
 
-    await call.answer("Событие сохранено.")
+    wake_worker()  # не ждём интервала воркера; результат придёт сообщением (notify_queue_result)
+    await call.answer("Добавляю в календарь…")
     saved = await get_event(ev.id)
     text = _card_text(saved) if saved is not None else "⏳ Событие поставлено в очередь."
     await call.message.edit_text(text, reply_markup=_status_kb(ev.id))
+
+
+# ---------- Ошибки календаря ----------
+
+def _calendar_unavailable(result: dict) -> bool:
+    """Google недоступен (429/5xx, сеть, таймаут, внутренняя ошибка коннектора) — поможет повтор позже."""
+    return bool(result.get("queued") or result.get("need_queue"))
+
+
+async def _calendar_error(call: types.CallbackQuery, ev, result: dict, *, card: str, later: str,
+                          failed: str, restore_kb=None) -> None:
+    """Общий обработчик неуспешного ответа calendar_connector.
+
+    * календарь недоступен — операция к этому моменту уже в очереди: пишем «добавлю/удалю,
+      когда календарь будет доступен»;
+    * CalendarAuthError (error_type=auth_error: токена нет, он отозван или устарел) — кнопка
+      «Переподключить календарь», после переподключения действие можно повторить той же кнопкой;
+    * остальное (например, ошибка валидации) — текст ошибки.
+    """
+    if _calendar_unavailable(result):
+        await call.message.edit_text(f"{card}\n\n⏳ Google Календарь сейчас недоступен — "
+                                     f"{later}, когда календарь будет доступен.")
+        return
+    if restore_kb is not None:  # возвращаем кнопку, чтобы действие можно было повторить
+        await call.message.edit_reply_markup(reply_markup=restore_kb)
+    if result.get("error_type") == "auth_error":
+        logger.info("CalendarAuthError у user_id=%s (events.id=%s): %s", ev.user_id, ev.id, result.get("message"))
+        await call.message.answer("🔒 Нет доступа к Google Календарю: разрешение отозвано или устарело.\n"
+                                  "Переподключите календарь и повторите действие.",
+                                  reply_markup=keyb.reconnect_kb())
+        return
+    logger.warning("Не удалось %s (events.id=%s): %s", failed, ev.id, result)
+    await call.message.answer(f"Не удалось {failed}: {html.escape(result.get('message') or 'неизвестная ошибка')}")
+
+
+def _created_kb(ev):
+    """Кнопки карточки события, уже добавленного в Google Календарь."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Отменить серию" if ev.rrule else "🗑 Удалить", callback_data=f"ev:remove:{ev.id}")
+    return kb.as_markup()
+
+
+def _with_reconnect(markup):
+    """Кнопка «Переподключить календарь» над кнопками карточки."""
+    kb = InlineKeyboardBuilder.from_markup(keyb.reconnect_kb())
+    kb.attach(InlineKeyboardBuilder.from_markup(markup))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def notify_queue_result(op: dict, outcome: str, result: dict) -> None:
+    """Колбэк воркера очереди (run_worker(on_result=...)): операция из очереди выполнена
+    или окончательно не удалась — обновляем статус события и сообщаем пользователю."""
+    if op["action"] not in ("create", "delete") or op["event_id"] is None:
+        return
+    ev = await get_event(op["event_id"])
+    if ev is None:
+        return
+    series = bool(ev.rrule)
+    card = '\n'.join(_event_card(ev))
+    auth = result.get("error_type") == "auth_error"
+    error = html.escape(result.get("message") or "неизвестная ошибка")
+
+    if op["action"] == "create":
+        if outcome == "done":
+            # статус confirmed и google_event_id воркер уже записал (_finish)
+            link = result.get("html_link")
+            done = "✅ Добавлено в календарь"
+            if link:
+                done = f'<a href="{html.escape(link)}">{done}</a>'
+            text, markup = f"{card}\n\n{done}", _created_kb(ev)
+        else:
+            await update_event(ev.id, status="draft")  # можно снова нажать «Добавить в календарь»
+            if auth:
+                text = (f"{card}\n\n🔒 Не удалось добавить событие: нет доступа к Google Календарю.\n"
+                        "Переподключите календарь и нажмите «Добавить в календарь».")
+                markup = _with_reconnect(_event_kb(ev.id))
+            else:
+                text, markup = f"{card}\n\n❌ Не удалось добавить событие: {error}", _event_kb(ev.id)
+    else:  # delete
+        if outcome == "done":
+            done = ("🗑 Google Календарь снова доступен — серия отменена" if series
+                    else "🗑 Google Календарь снова доступен — событие удалено")
+            text, markup = f"{card}\n\n{done}", None
+        else:
+            await update_event(ev.id, status="confirmed")  # в Google событие осталось
+            what = "отменить серию" if series else "удалить событие"
+            if auth:
+                text = (f"{card}\n\n🔒 Не удалось {what}: нет доступа к Google Календарю.\n"
+                        "Переподключите календарь и повторите.")
+                markup = _with_reconnect(_created_kb(ev))
+            else:
+                text, markup = f"{card}\n\n❌ Не удалось {what}: {error}", _created_kb(ev)
+
+    logger.info("Очередь: operation id=%s %s %s (events.id=%s)", op["id"], op["action"], outcome, ev.id)
+    await bot.send_message(chat_id=ev.user_id, text=text, reply_markup=markup)
+
+
+def _remove_confirm_kb(ev):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, отменить серию" if ev.rrule else "✅ Да, удалить", callback_data=f"ev:remove_yes:{ev.id}")
+    kb.button(text="↩️ Нет", callback_data=f"ev:remove_no:{ev.id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def _remove_from_calendar(call: types.CallbackQuery, ev):
+    """Удаляет событие из Google Календаря (для повторяющегося — всю серию) и ставит статус deleted."""
+    if ev.status != "confirmed":
+        await call.answer("Событие уже удалено или ещё не добавлено в календарь.", show_alert=True)
+        return
+    if not ev.google_event_id:
+        await call.answer("Не найден id события в Google — удалите его в календаре вручную.", show_alert=True)
+        return
+
+    from calendarr.calendar_connector import delete_event  # Google-библиотеки грузим лениво
+    from calendarr.storage import DBTokenStorage
+
+    series = bool(ev.rrule)
+    await call.answer("Отменяю серию…" if series else "Удаляю…")
+    # id «основного» события; для повторяющегося Google удаляет вместе с ним все повторения
+    result = await delete_event(ev.user_id, DBTokenStorage(), ev.google_event_id)
+    card = '\n'.join(_event_card(ev))
+
+    if result.get("status") == "success":  # в том числе если в Google его уже удалили вручную
+        await update_event(ev.id, status="deleted")
+        done = "🗑 Серия отменена — все повторения удалены из календаря" if series else "🗑 Удалено из календаря"
+        await call.message.edit_text(f"{card}\n\n{done}")
+    else:
+        if _calendar_unavailable(result):
+            # Google временно недоступен: удаление повторит воркер очереди
+            await enqueue_operation(ev.user_id, "delete", {"google_event_id": ev.google_event_id},
+                                    event_id=ev.id, delay_seconds=30)
+            await update_event(ev.id, status="deleted")
+        await _calendar_error(call, ev, result, card=card,
+                              later="отменю серию" if series else "удалю",
+                              failed="отменить серию" if series else "удалить событие",
+                              restore_kb=_created_kb(ev))
 
 
 @rt.callback_query(F.data.startswith("ev:"))
@@ -331,7 +517,7 @@ async def action_event(call: types.CallbackQuery, state: FSMContext):
         case "add":
             await _add_to_calendar(call, ev)
         case "edit":
-            if ev.status != "waiting":
+            if ev.status != "draft":
                 await call.answer("Событие уже обработано — изменить его нельзя.", show_alert=True)
                 return
             kb = InlineKeyboardBuilder()
@@ -343,7 +529,7 @@ async def action_event(call: types.CallbackQuery, state: FSMContext):
             await call.message.edit_text("Что вы хотите изменить?", reply_markup=kb.as_markup())
             await call.answer()
         case "edit_title" | "edit_time" | "edit_location":
-            if ev.status != "waiting":
+            if ev.status != "draft":
                 await call.answer("Событие уже обработано — изменить его нельзя.", show_alert=True)
                 return
             field = action.removeprefix("edit_")
@@ -359,14 +545,28 @@ async def action_event(call: types.CallbackQuery, state: FSMContext):
             await _delete_messages(call.message.chat.id, extra)
             # Повторное нажатие для статуса «в очереди» не меняет карточку.
             if ev.status != "queued":
-                markup = _event_kb(event_id) if ev.status == "waiting" else None
+                markup = (_event_kb(event_id) if ev.status == "draft"
+                          else _created_kb(ev) if ev.status == "confirmed" else None)
                 await call.message.edit_text(_card_text(ev), reply_markup=markup)
             else:
                 await call.answer("Событие ещё в очереди.")
                 return
             await call.answer()
+        case "remove":
+            # подтверждение: меняем только кнопки, текст карточки (и ссылка на событие) остаётся
+            if ev.status != "confirmed":
+                await call.answer("Событие уже удалено или ещё не добавлено в календарь.", show_alert=True)
+                return
+            await call.message.edit_reply_markup(reply_markup=_remove_confirm_kb(ev))
+            await call.answer("Отменить все повторения этого события?" if ev.rrule
+                              else "Удалить событие из Google Календаря?", show_alert=True)
+        case "remove_no":
+            await call.message.edit_reply_markup(reply_markup=_created_kb(ev) if ev.status == "confirmed" else None)
+            await call.answer()
+        case "remove_yes":
+            await _remove_from_calendar(call, ev)
         case "del":
-            if not await update_event(event_id, waiting_user_id=ev.user_id, status="declined"):
+            if not await update_event(event_id, draft_user_id=ev.user_id, status="declined"):
                 await call.answer("Событие больше нельзя отклонить.", show_alert=True)
                 return
             await call.message.edit_text('\n'.join(_event_card(ev)) + "\n\n❌ Не добавлено")
@@ -405,7 +605,7 @@ async def edit_event_value(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     event_id, field = data.get("event_id"), data.get("field")
     ev = await get_event(event_id) if event_id else None
-    if ev is None or ev.user_id != msg.from_user.id or ev.status != "waiting":
+    if ev is None or ev.user_id != msg.from_user.id or ev.status != "draft":
         await state.clear()
         await msg.answer("Это событие больше нельзя изменить.")
         return
@@ -431,12 +631,12 @@ async def edit_event_value(msg: types.Message, state: FSMContext):
             await state.clear()
             return
 
-    if not await update_event(event_id, waiting_user_id=ev.user_id, **changes):
+    if not await update_event(event_id, draft_user_id=ev.user_id, **changes):
         await _reply_and_remember(msg, state, "Не удалось сохранить изменения. Попробуйте ещё раз.")
         return
     await state.clear()
     await _delete_messages(msg.chat.id, data.get("cleanup", []))
     ev = await get_event(event_id)
     if ev is not None:
-        markup = _event_kb(event_id) if ev.status == "waiting" else None
+        markup = _event_kb(event_id) if ev.status == "draft" else None
         await msg.answer(_card_text(ev), reply_markup=markup)
