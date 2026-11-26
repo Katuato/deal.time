@@ -42,6 +42,11 @@ async def add_user(user_id: int):
             return False
 
 
+async def notifications_enabled(user_id: int) -> bool:
+    user = await get_user(user_id)
+    return user is None or user.notification is not False
+
+
 USER_FIELDS = {"timezone", "notification"}
 
 
@@ -186,6 +191,38 @@ async def add_buss_conn(user_id: int, business_token: Optional[str] = None,
             await session.rollback()
             logger.exception("Ошибка в add_buss_conn (user_id=%s)", user_id)
             return False
+
+
+# ---------- Чаты Telegram Business ----------
+
+async def record_business_chat(user_id: int, chat_id: int, chat_title: str | None) -> None:
+    try:
+        async with async_session.begin() as session:
+            statement = insert(Chat).values(user_id=user_id, chat_id=chat_id, chat_title=chat_title)
+            await session.execute(statement.on_conflict_do_update(
+                index_elements=[Chat.user_id, Chat.chat_id],
+                set_={"chat_title": statement.excluded.chat_title},
+                where=(statement.excluded.chat_title.is_not(None)
+                       & Chat.chat_title.is_distinct_from(statement.excluded.chat_title)),
+            ))
+    except Exception:
+        logger.exception("Не удалось записать чат Telegram Business (user_id=%s)", user_id)
+
+
+async def get_business_chats(user_id: int, *, offset: int, limit: int) -> list[Chat] | None:
+    try:
+        async with async_session() as session:
+            statement = (
+                select(Chat)
+                .where(Chat.user_id == user_id, Chat.chat_id.is_not(None))
+                .order_by(Chat.id)
+                .offset(offset)
+                .limit(limit)
+            )
+            return list((await session.scalars(statement)).all())
+    except Exception:
+        logger.exception("Не удалось получить чаты Telegram Business (user_id=%s)", user_id)
+        return None
 
 
 # ---------- События ----------

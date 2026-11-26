@@ -14,7 +14,8 @@ from calendarr.nlp_adapter import build_event_data
 from calendarr.oauth import build_auth_url
 from config import bot, logger
 from database.models import (
-    add_buss_conn, add_event, get_buss_conn, get_event, get_user, has_active_consent, update_event,
+    add_buss_conn, add_event, get_buss_conn, get_event, get_user, has_active_consent,
+    notifications_enabled, record_business_chat, update_event,
 )
 from modules.nlp_module import (process_dialogue_message, DialogueState, DEFAULT_TZ, resolve_date,
                                  merge_clarification, get_zone, Event as NlpEvent, fill_datetimes,
@@ -71,7 +72,9 @@ async def check_business_conn(bus_conn: types.BusinessConnection):
     if connection is None or connection.google_token is None:
         markup = keyb.google_conn_kb()
         text += "\n\nПожалуйста, подключите Google Календарь."
-    await bot.send_message(chat_id=user_id, text=text, reply_markup=markup)
+    enabled = await notifications_enabled(user_id)
+    if markup is not None or enabled:
+        await bot.send_message(chat_id=user_id, text=text, reply_markup=markup, disable_notification=not enabled)
 
 
 @rt.callback_query(F.data=="google_connect")
@@ -93,7 +96,7 @@ async def google_connect(call: types.CallbackQuery):
 
 @rt.business_message()
 async def new_message(msg: types.Message):
-    if msg.chat.type != "private" or not msg.business_connection_id or not (msg.voice or msg.text):
+    if msg.chat.type != "private" or not msg.business_connection_id:
         return
     try:
         buss_conn = await bot.get_business_connection(msg.business_connection_id)
@@ -108,10 +111,14 @@ async def new_message(msg: types.Message):
         dialogue_states.pop(dialogue_key, None)
         return
 
+    user = await get_user(owner_id)
+    if user is not None:
+        await record_business_chat(owner_id, msg.chat.id, msg.chat.full_name or msg.chat.username)
+    if not (msg.voice or msg.text):
+        return
     text = await _transcribe_voice(msg.voice) if msg.voice else msg.text
     if not text or not text.strip():
         return
-    user = await get_user(owner_id)
     tz = user.timezone if user is not None and user.timezone else DEFAULT_TZ
     dialogue_state = dialogue_states.setdefault(dialogue_key, DialogueState())
     try:
@@ -293,7 +300,8 @@ async def new_event(answ, user_id, chat_id, user_tz):
     if rec is None:  # не create или статус не ok — сюда не должно попадать
         logger.warning("new_event: NLP-результат не подходит для создания события")
         return
-    # колонки events повторяют to_event_record; время храним без пояса (пояс — в колонке timezone)
+    silent = not await notifications_enabled(user_id)
+    # Время храним без смещения, часовой пояс — в отдельной колонке.
     event_id = await add_event(
         user_id=user_id, chat_id=chat_id, title=rec["title"],
         starts_at=_to_naive(rec["starts_at"]), ends_at=_to_naive(rec["ends_at"]),
@@ -304,17 +312,22 @@ async def new_event(answ, user_id, chat_id, user_tz):
         status=rec["status"],
     )
     if event_id is None:
-        await bot.send_message(chat_id=user_id, text="Не удалось сохранить новое событие. Попробуйте позже.")
+        await bot.send_message(
+            chat_id=user_id, text="Не удалось сохранить новое событие. Попробуйте позже.", disable_notification=silent,
+        )
         return
     saved = await get_event(event_id)
     if saved is None:
-        await bot.send_message(chat_id=user_id, text="Не удалось показать карточку события.")
+        await bot.send_message(chat_id=user_id, text="Не удалось показать карточку события.", disable_notification=silent)
         return
     lines = ['Обнаружено новое событие:', *_event_card(saved)]
     if answ.get("clarify"):
         lines.append(f'❓ {html.escape(answ["clarify"])}')
     lines.append('Выберите действие:')
-    await bot.send_message(chat_id=user_id, text='\n'.join(lines), reply_markup=_event_kb(event_id))
+    await bot.send_message(
+        chat_id=user_id, text='\n'.join(lines), reply_markup=_event_kb(event_id),
+        disable_notification=silent,
+    )
 
 
 def _calendar_event_data(ev):
@@ -455,7 +468,8 @@ async def notify_queue_result(op: dict, outcome: str, result: dict) -> None:
                 text, markup = f"{card}\n\n❌ Не удалось {what}: {error}", _created_kb(ev)
 
     logger.info("Очередь: operation id=%s %s %s (events.id=%s)", op["id"], op["action"], outcome, ev.id)
-    await bot.send_message(chat_id=ev.user_id, text=text, reply_markup=markup)
+    await bot.send_message(chat_id=ev.user_id, text=text, reply_markup=markup,
+                           disable_notification=not await notifications_enabled(ev.user_id))
 
 
 def _remove_confirm_kb(ev):

@@ -8,7 +8,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
-from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON, Index, Interval, CheckConstraint, text
+from sqlalchemy import ForeignKey, String, BigInteger, Column, Integer, DateTime, Boolean, JSON, Index, Interval, CheckConstraint, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 load_dotenv()
@@ -82,8 +82,9 @@ class Connection(Base):
     status = Column(Boolean, default=None)
 class Chat(Base):
     __tablename__ = 'chats'
+    __table_args__ = (UniqueConstraint("user_id", "chat_id", name="uq_chats_user_chat"),)
     id = Column(Integer, index=True, primary_key=True)
-    user_id = Column(BigInteger, ForeignKey("users.user_id"), unique=True)
+    user_id = Column(BigInteger, ForeignKey("users.user_id"))
     chat_id = Column(BigInteger)
     chat_title = Column(String, default=None)
 class Event(Base):

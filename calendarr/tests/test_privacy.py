@@ -20,12 +20,14 @@ def handlers(monkeypatch):
             id="business-connection", is_enabled=True, user=SimpleNamespace(id=7),
         )),
         download=AsyncMock(),
+        send_message=AsyncMock(),
     )
     config.logger = logging.getLogger("privacy-test")
     monkeypatch.setitem(sys.modules, "config", config)
 
     models = ModuleType("database.models")
-    for name in ("add_buss_conn", "add_event", "get_buss_conn", "get_event", "get_user", "update_event"):
+    for name in ("add_buss_conn", "add_event", "get_buss_conn", "get_event", "get_user",
+                 "notifications_enabled", "record_business_chat", "update_event"):
         setattr(models, name, AsyncMock())
     models.has_active_consent = AsyncMock(return_value=True)
     monkeypatch.setitem(sys.modules, "database.models", models)
@@ -46,7 +48,7 @@ def handlers(monkeypatch):
 @pytest.fixture
 def voice_message():
     return SimpleNamespace(
-        chat=SimpleNamespace(id=1, type="private"),
+        chat=SimpleNamespace(id=1, type="private", full_name="Имя контакта", username=None),
         business_connection_id="business-connection",
         voice=SimpleNamespace(file_id="voice-file"),
         text=None,
@@ -64,6 +66,38 @@ async def test_voice_is_ignored_without_consent_or_enabled_grant(handlers, voice
     handlers.bot.download.assert_not_awaited()
     handlers._stt.transcribe.assert_not_called()
     handlers.process_dialogue_message.assert_not_called()
+    handlers.record_business_chat.assert_not_awaited()
+
+
+async def test_business_update_records_chat_under_the_connection_owner(handlers, voice_message):
+    handlers.get_user.return_value = SimpleNamespace(timezone=None)
+    voice_message.voice = None
+
+    await handlers.new_message(voice_message)
+
+    handlers.record_business_chat.assert_awaited_once_with(7, 1, "Имя контакта")
+    handlers.process_dialogue_message.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_event_card_respects_notification_sound_preference(handlers, enabled):
+    handlers.notifications_enabled.return_value = enabled
+    handlers.add_event.return_value = 12
+    handlers.get_event.return_value = SimpleNamespace(
+        title="Тестовая встреча", starts_at=None, location=None, rrule=None,
+    )
+    event = handlers.NlpEvent(
+        intent="create", summary="Тестовая встреча",
+        starts_at="2026-11-27T15:00:00+03:00", ends_at="2026-11-27T15:30:00+03:00",
+    ).model_dump()
+
+    await handlers.new_event({"status": "ok", "event": event}, user_id=7, chat_id=1, user_tz="Europe/Moscow")
+
+    handlers.notifications_enabled.assert_awaited_once_with(7)
+    sent = handlers.bot.send_message.await_args.kwargs
+    assert sent["chat_id"] == 7
+    assert sent["disable_notification"] is not enabled
+    assert sent["reply_markup"].inline_keyboard[0][0].callback_data == "ev:add:12"
 
 
 @pytest.mark.parametrize("failure", ["download", "transcribe"])

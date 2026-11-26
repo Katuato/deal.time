@@ -14,12 +14,14 @@ from config import bot
 from database.db import check_database, engine, get_token_cipher
 from logging_setup import LoggingContextMiddleware, setup_logging
 from tg_bot.handlers import initialize_stt, notify_queue_result, rt
+from tg_bot.settings import router as settings_router
 from tg_bot.user_end import us
 
 logger = logging.getLogger(__name__)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 dp.update.outer_middleware(LoggingContextMiddleware())
+dp.include_router(settings_router)
 dp.include_router(rt)
 dp.include_router(us)
 

@@ -12,7 +12,7 @@ import config
 from calendarr import oauth
 from calendarr.storage import DBTokenStorage
 from database.db import check_database
-from database.models import has_active_consent
+from database.models import has_active_consent, notifications_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +67,9 @@ async def oauth_callback(request: Request) -> HTMLResponse:
                      "Не удалось сохранить токен. Попробуйте позже.", 400)
 
     try:
-        await config.bot.send_message(
-            chat_id=user_id, text="Google Календарь успешно подключён ✅")
+        if await notifications_enabled(user_id):
+            await config.bot.send_message(
+                chat_id=user_id, text="Google Календарь успешно подключён ✅")
     except Exception:  # noqa: BLE001
         logger.exception("Не удалось отправить уведомление user_id=%s", user_id)
 

@@ -1,4 +1,5 @@
 import importlib.util
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +24,9 @@ def onboarding(monkeypatch):
         get_user=AsyncMock(return_value=None),
         has_active_consent=AsyncMock(return_value=False),
     )
-    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(bot=bot, logger=SimpleNamespace(info=lambda *_: None)))
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(bot=bot, logger=logging.getLogger(__name__)))
     monkeypatch.setitem(sys.modules, "database.models", models)
+    monkeypatch.setitem(sys.modules, "calendarr.storage", SimpleNamespace(DBTokenStorage=lambda: object()))
     path = Path(__file__).resolve().parents[2] / "tg_bot" / "user_end.py"
     spec = importlib.util.spec_from_file_location("_test_consent_onboarding", path)
     module = importlib.util.module_from_spec(spec)
@@ -84,3 +86,18 @@ async def test_consent_button_cannot_be_used_by_another_user(onboarding):
     module, models, bot = onboarding
     await module.user_consent_accept(consent_click(bot, module.CONSENT_CALLBACK, user_id=123))
     models.accept_consent.assert_not_awaited()
+
+
+async def test_start_with_consent_displays_calendar_and_business_status(onboarding, monkeypatch):
+    module, models, bot = onboarding
+    models.has_active_consent.return_value = True
+    models.get_user.return_value = SimpleNamespace(timezone="Europe/Moscow")
+    models.get_buss_conn.return_value = SimpleNamespace(business_token="business", google_token="token", status=True)
+    bot.get_business_connection.return_value = SimpleNamespace(is_enabled=True, user=SimpleNamespace(id=7))
+    monkeypatch.setattr(module, "check_connection", AsyncMock(return_value={"status": "success"}))
+
+    await module.command_start(private_message(bot), SimpleNamespace(clear=AsyncMock()))
+
+    assert "Google Календарь: подключён" in bot.send_message.await_args.kwargs["text"]
+    assert "Бизнес-чаты: подключены" in bot.send_message.await_args.kwargs["text"]
+    bot.send_rich_message.assert_not_awaited()
