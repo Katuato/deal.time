@@ -1275,6 +1275,9 @@ class DialogueState:
         self.target_event_id = None
         self.reference_time = None
         self.last_message_time = None
+        # данные приложения об уже показанном черновике (например, id события и карточки);
+        # сбрасываются вместе с черновиком, чтобы уточнение не попало в чужую карточку
+        self.sent = None
 
 
 def dialogue_question(ev: Event, target_event_id=None) -> Tuple[List[str], Optional[str]]:
@@ -1388,6 +1391,7 @@ def process_dialogue_message(text: str, state: DialogueState, *,
         state.event = None
         state.target_event_id = None
         state.reference_time = None
+        state.sent = None
     if state.event is None:
         ev = incoming
     else:

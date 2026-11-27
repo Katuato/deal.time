@@ -208,3 +208,62 @@ async def test_repeated_business_update_does_not_repeat_setup(handlers, business
 
     handlers.add_buss_conn.assert_not_awaited()
     setup.continue_setup.assert_not_awaited()
+
+
+async def test_chat_correction_updates_the_shown_card(handlers):
+    """Переписка из чата: «Пойдем в бильярд?» / «В 18» / «Завтра в бильярд в 18» /
+    «давай лучше в 20» / «Хорошо!». Модель подменена, правила и диалог — настоящие."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from modules import nlp_module as nlp
+
+    answers = {
+        "Пойдем в бильярд?": {"intent": "create", "summary": "Бильярд"},
+        "В 18": {"intent": "create", "summary": "Встреча"},
+        "Завтра в бильярд в 18": {"intent": "create", "summary": "Бильярд"},
+        "давай лучше в 20": {"intent": "create", "summary": "Встреча"},
+        "Хорошо!": {"intent": None},
+    }
+
+    def extractor(text, context=None, message_time=None, tz=nlp.DEFAULT_TZ):
+        ev = nlp.postprocess(text, answers[text], context, message_time, tz)
+        return {"status": "ok", "event": ev.model_dump() if ev.intent else None}
+
+    handlers.process_dialogue_message = (
+        lambda **kw: nlp.process_dialogue_message(extractor=extractor, **kw))
+    handlers.get_user.return_value = SimpleNamespace(timezone="Europe/Moscow")
+    handlers.add_event.return_value = 42
+    handlers.update_event.return_value = True
+    stored = {}
+
+    async def add_event(**fields):
+        stored.update(fields, status="draft")
+        return 42
+
+    async def update_event(event_id, draft_user_id=None, **fields):
+        stored.update(fields)
+        return True
+
+    handlers.add_event.side_effect = add_event
+    handlers.update_event.side_effect = update_event
+    handlers.get_event.side_effect = lambda event_id: SimpleNamespace(rrule=None, **{
+        "title": stored["title"], "starts_at": stored["starts_at"], "location": stored.get("location")})
+    handlers.bot.send_message.return_value = SimpleNamespace(message_id=100)
+    handlers.bot.edit_message_text = AsyncMock()
+
+    when = datetime(2026, 11, 27, 9, 59, tzinfo=ZoneInfo("UTC"))   # 12:59 по Москве
+    for text in answers:
+        await handlers.new_message(SimpleNamespace(
+            chat=SimpleNamespace(id=1, type="private", full_name="Контакт", username=None),
+            business_connection_id="business-connection", voice=None, text=text, date=when))
+
+    # «В 18» без дня — сегодня в 18:00; затем карточка уточняется, а не создаётся заново
+    assert handlers.add_event.await_count == 1
+    assert handlers.add_event.await_args.kwargs["starts_at"] == datetime(2026, 11, 27, 18, 0)
+    assert stored["starts_at"] == datetime(2026, 11, 28, 20, 0)
+    assert stored["title"] == "Бильярд"
+    edits = handlers.bot.edit_message_text.await_args_list
+    assert [e.kwargs["message_id"] for e in edits] == [100, 100]   # завтра в 18, затем в 20; «Хорошо!» не трогает
+    assert "28.11.2026 в 20:00" in edits[-1].kwargs["text"]
+    assert handlers.bot.send_message.await_count == 1

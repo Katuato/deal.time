@@ -167,21 +167,29 @@ async def _handle_message(msg: types.Message):
             answ, status = guessed, "ok"
     if status != "ok" or intent != "create":
         return
-    dialogue_state.reset()
-    await new_event(answ, user_id=owner_id, chat_id=msg.chat.id, user_tz=tz)
+    # Черновик не сбрасываем: «давай лучше в 20» после карточки меняет её, а не теряется.
+    # Через DialogueState.timeout_seconds тишины (или при новой договорённости) черновик забывается.
+    if dialogue_state.sent is None:
+        dialogue_state.sent = await new_event(answ, user_id=owner_id, chat_id=msg.chat.id, user_tz=tz)
+    else:
+        dialogue_state.sent = await _update_sent_event(
+            answ, dialogue_state.sent, user_id=owner_id, chat_id=msg.chat.id, user_tz=tz,
+        )
 
 def _guess_ambiguous_time(answ: dict, message_time: datetime, tz: str) -> dict | None:
-    """Если не хватает только однозначного времени, а дата и вариант времени есть, — подставляет
-    вариант, который выбрал NLP (для «в 5» это 17:00), и возвращает ответ с заполненным starts_at.
-    В остальных случаях (нет даты, нет времени, время уже прошло) — None."""
-    if set(answ.get("missing") or []) - {"time"}:
+    """В бизнес-чате переспросить собеседника нельзя, поэтому недостающее угадываем:
+    неоднозначное время — вариант, который выбрал NLP (для «в 5» это 17:00); время без дня
+    («в 18») — ближайшее: сегодня, а если уже прошло — завтра. Возвращает ответ с заполненным
+    starts_at. Если нет времени или не хватает чего-то другого — None."""
+    missing = set(answ.get("missing") or [])
+    if missing - {"time", "date"}:
         return None
     raw = answ.get("event") or {}
     try:
         ev = NlpEvent.model_validate(raw)
     except Exception:  # noqa: BLE001
         return None
-    if not (ev.time_ambiguous or ev.time_options):
+    if not (ev.time_ambiguous or ev.time_options or "date" in missing):
         return None
     if ev.time_options and not ev.time:
         ev.time = ev.time_options[0]
@@ -320,11 +328,61 @@ def _parse_new_time(text: str, ev) -> datetime | None:
     return datetime(day.year, day.month, day.day, int(hhmm[:2]), int(hhmm[3:]))
 
 
-async def new_event(answ, user_id, chat_id, user_tz):
+def _record_key(rec: dict) -> tuple:
+    """Поля карточки: если они не изменились, «Хорошо!» после карточки ничего не трогает."""
+    return (rec["title"], rec["starts_at"], rec["ends_at"], rec["location"], rec["rrule"],
+            tuple(p["name"] for p in rec["participants"]))
+
+
+def _new_card_text(saved, answ: dict, header: str) -> str:
+    lines = [header, *_event_card(saved)]
+    if answ.get("clarify"):
+        lines.append(f'❓ {html.escape(answ["clarify"])}')
+    lines.append('Выберите действие:')
+    return '\n'.join(lines)
+
+
+async def _update_sent_event(answ, sent: dict, user_id, chat_id, user_tz) -> dict | None:
+    """Уточнение после показанной карточки: меняет черновик и текст той же карточки.
+    Если событие уже добавлено или отклонено, присылает новую карточку."""
+    rec = to_event_record(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
+    if rec is None:
+        return sent
+    key = _record_key(rec)
+    if key == sent["key"]:
+        return sent   # «Хорошо!», «договорились» — ничего не поменялось
+    event_id = sent["event_id"]
+    updated = await update_event(
+        event_id, draft_user_id=user_id, title=rec["title"],
+        starts_at=_to_naive(rec["starts_at"]), ends_at=_to_naive(rec["ends_at"]),
+        duration=rec["duration"], timezone=rec["timezone"], location=rec["location"],
+        participants=rec["participants"], rrule=rec["rrule"],
+    )
+    if not updated:   # черновик уже добавлен в календарь, отклонён или удалён
+        return await new_event(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
+    saved = await get_event(event_id)
+    if saved is None:
+        return sent
+    text = _new_card_text(saved, answ, "Событие обновлено:")
+    try:
+        await bot.edit_message_text(chat_id=user_id, message_id=sent["message_id"], text=text,
+                                    reply_markup=_event_kb(event_id))
+    except Exception as error:  # noqa: BLE001 — карточку удалили или она слишком старая
+        logger.info("Не удалось обновить карточку события (%s), отправляю новую", type(error).__name__)
+        silent = not await notifications_enabled(user_id)
+        message = await bot.send_message(chat_id=user_id, text=text, reply_markup=_event_kb(event_id),
+                                         disable_notification=silent)
+        return {"event_id": event_id, "message_id": message.message_id, "key": key}
+    return {**sent, "key": key}
+
+
+async def new_event(answ, user_id, chat_id, user_tz) -> dict | None:
+    """Сохраняет черновик и присылает карточку. Возвращает {event_id, message_id, key} для
+    последующих уточнений или None, если карточку показать не удалось."""
     rec = to_event_record(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
     if rec is None:  # не create или статус не ok — сюда не должно попадать
         logger.warning("new_event: NLP-результат не подходит для создания события")
-        return
+        return None
     silent = not await notifications_enabled(user_id)
     # Время храним без смещения, часовой пояс — в отдельной колонке.
     event_id = await add_event(
@@ -344,15 +402,12 @@ async def new_event(answ, user_id, chat_id, user_tz):
     saved = await get_event(event_id)
     if saved is None:
         await bot.send_message(chat_id=user_id, text="Не удалось показать карточку события.", disable_notification=silent)
-        return
-    lines = ['Обнаружено новое событие:', *_event_card(saved)]
-    if answ.get("clarify"):
-        lines.append(f'❓ {html.escape(answ["clarify"])}')
-    lines.append('Выберите действие:')
-    await bot.send_message(
-        chat_id=user_id, text='\n'.join(lines), reply_markup=_event_kb(event_id),
-        disable_notification=silent,
+        return None
+    message = await bot.send_message(
+        chat_id=user_id, text=_new_card_text(saved, answ, 'Обнаружено новое событие:'),
+        reply_markup=_event_kb(event_id), disable_notification=silent,
     )
+    return {"event_id": event_id, "message_id": message.message_id, "key": _record_key(rec)}
 
 
 def _calendar_event_data(ev):
