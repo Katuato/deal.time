@@ -177,12 +177,19 @@ async def _handle_message(msg: types.Message):
         return
     # Черновик не сбрасываем: «давай лучше в 20» после карточки меняет её, а не теряется.
     # Через DialogueState.timeout_seconds тишины (или при новой договорённости) черновик забывается.
+    chat_label = f"@{msg.chat.username}" if msg.chat.username else msg.chat.full_name
     if dialogue_state.sent is None:
-        dialogue_state.sent = await new_event(answ, user_id=owner_id, chat_id=msg.chat.id, user_tz=tz)
+        dialogue_state.sent = await new_event(answ, user_id=owner_id, chat_id=msg.chat.id, user_tz=tz,
+                                              chat_label=chat_label)
     else:
-        dialogue_state.sent = await _update_sent_event(
+        sent = await _update_sent_event(
             answ, dialogue_state.sent, user_id=owner_id, chat_id=msg.chat.id, user_tz=tz,
+            chat_label=chat_label,
         )
+        if sent is None:
+            dialogue_state.reset()   # по карточке уже решили, а время не менялось — разговор окончен
+        else:
+            dialogue_state.sent = sent
 
 def _guess_ambiguous_time(answ: dict, message_time: datetime, tz: str) -> dict | None:
     """В бизнес-чате переспросить собеседника нельзя, поэтому недостающее угадываем:
@@ -346,17 +353,21 @@ def _record_key(rec: dict) -> tuple:
             tuple(p["name"] for p in rec["participants"]))
 
 
-def _new_card_text(saved, answ: dict, header: str) -> str:
+def _new_card_text(saved, answ: dict, header: str, chat_label: str | None = None) -> str:
     lines = [header, *_event_card(saved)]
+    if chat_label:
+        lines.append(f'💬 Чат: {html.escape(chat_label)}')
     if answ.get("clarify"):
         lines.append(f'❓ {html.escape(answ["clarify"])}')
     lines.append('Выберите действие:')
     return '\n'.join(lines)
 
 
-async def _update_sent_event(answ, sent: dict, user_id, chat_id, user_tz) -> dict | None:
+async def _update_sent_event(answ, sent: dict, user_id, chat_id, user_tz,
+                             chat_label: str | None = None) -> dict | None:
     """Уточнение после показанной карточки: меняет черновик и текст той же карточки.
-    Если событие уже добавлено или отклонено, присылает новую карточку."""
+    Если событие уже добавлено или отклонено, новую карточку присылает только при смене
+    времени; иначе возвращает None — разговор об этой карточке окончен."""
     rec = to_event_record(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
     if rec is None:
         return sent
@@ -371,11 +382,14 @@ async def _update_sent_event(answ, sent: dict, user_id, chat_id, user_tz) -> dic
         participants=rec["participants"], rrule=rec["rrule"],
     )
     if not updated:   # черновик уже добавлен в календарь, отклонён или удалён
-        return await new_event(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
+        if key[1:3] == sent["key"][1:3]:
+            return None   # «Хорошо, договорились» после «Добавить» — дубль не нужен
+        return await new_event(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz,
+                               chat_label=chat_label)
     saved = await get_event(event_id)
     if saved is None:
         return sent
-    text = _new_card_text(saved, answ, "Событие обновлено:")
+    text = _new_card_text(saved, answ, "Событие обновлено:", chat_label)
     try:
         await bot.edit_message_text(chat_id=user_id, message_id=sent["message_id"], text=text,
                                     reply_markup=_event_kb(event_id))
@@ -388,7 +402,7 @@ async def _update_sent_event(answ, sent: dict, user_id, chat_id, user_tz) -> dic
     return {**sent, "key": key}
 
 
-async def new_event(answ, user_id, chat_id, user_tz) -> dict | None:
+async def new_event(answ, user_id, chat_id, user_tz, chat_label: str | None = None) -> dict | None:
     """Сохраняет черновик и присылает карточку. Возвращает {event_id, message_id, key} для
     последующих уточнений или None, если карточку показать не удалось."""
     rec = to_event_record(answ, user_id=user_id, chat_id=chat_id, user_tz=user_tz)
@@ -416,7 +430,7 @@ async def new_event(answ, user_id, chat_id, user_tz) -> dict | None:
         await bot.send_message(chat_id=user_id, text="Не удалось показать карточку события.", disable_notification=silent)
         return None
     message = await bot.send_message(
-        chat_id=user_id, text=_new_card_text(saved, answ, 'Обнаружено новое событие:'),
+        chat_id=user_id, text=_new_card_text(saved, answ, 'Обнаружено новое событие:', chat_label),
         reply_markup=_event_kb(event_id), disable_notification=silent,
     )
     return {"event_id": event_id, "message_id": message.message_id, "key": _record_key(rec)}

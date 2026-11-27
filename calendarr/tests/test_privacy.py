@@ -330,3 +330,59 @@ async def test_processed_card_is_forgotten_and_reply_updates_new_card(handlers):
     card = handlers.bot.send_message.await_args_list[-1].kwargs["text"]
     assert "Уточните время" not in card
     assert "28.11.2026 в 18:00" in handlers.bot.edit_message_text.await_args.kwargs["text"]
+
+
+async def test_added_card_is_not_duplicated_by_agreement_reply(handlers):
+    """«Пойдешь с нами в бильярд в 18?» / «давай лучше в 20!!» / «Хорошо, договорились»;
+    «Добавить» нажали, пока разбиралось последнее сообщение, а модель назвала его «Дорогие»."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from modules import nlp_module as nlp
+
+    events = {}
+    answers = {
+        "Привет! Пойдешь в с нами в бильярд в 18?": {"intent": "create", "summary": "Встреча", "location": "бильярд"},
+        "давай лучше в 20!!": {"intent": "create", "summary": "Встреча"},
+        "Хорошо, договорились": {"intent": "create", "summary": "Дорогие"},
+    }
+
+    def extractor(text, context=None, message_time=None, tz=nlp.DEFAULT_TZ):
+        if text == "Хорошо, договорились":
+            events[1]["status"] = "queued"   # пользователь нажал «Добавить» во время разбора
+        ev = nlp.postprocess(text, answers[text], context, message_time, tz)
+        return {"status": "ok", "event": ev.model_dump() if ev.intent else None}
+
+    async def add_event(**fields):
+        events[len(events) + 1] = dict(fields, status="draft")
+        return len(events)
+
+    async def update_event(event_id, draft_user_id=None, **fields):
+        if events[event_id]["status"] != "draft":
+            return False
+        events[event_id].update(fields)
+        return True
+
+    handlers.process_dialogue_message = (
+        lambda **kw: nlp.process_dialogue_message(extractor=extractor, **kw))
+    handlers.get_user.return_value = SimpleNamespace(timezone="Europe/Moscow")
+    handlers.add_event.side_effect = add_event
+    handlers.update_event.side_effect = update_event
+    handlers.get_event.side_effect = lambda event_id: SimpleNamespace(
+        rrule=None, **{k: events[event_id].get(k) for k in ("title", "starts_at", "status", "location")})
+    handlers.bot.send_message.return_value = SimpleNamespace(message_id=100)
+    handlers.bot.edit_message_text = AsyncMock()
+
+    for text in answers:
+        await handlers.new_message(SimpleNamespace(
+            chat=SimpleNamespace(id=1, type="private", full_name="Аня", username="anya"),
+            business_connection_id="business-connection", voice=None, text=text,
+            date=datetime(2026, 11, 27, 11, 13, tzinfo=ZoneInfo("UTC"))))   # 14:13 по Москве
+
+    assert len(events) == 1                                   # без второй карточки «Дорогие»
+    assert events[1]["title"] == "Встреча"
+    assert events[1]["starts_at"] == datetime(2026, 11, 27, 20, 0)
+    assert handlers.bot.send_message.await_count == 1
+    first_card = handlers.bot.send_message.await_args.kwargs["text"]
+    assert "💬 Чат: @anya" in first_card
+    assert "💬 Чат: @anya" in handlers.bot.edit_message_text.await_args.kwargs["text"]

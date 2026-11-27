@@ -1317,6 +1317,13 @@ def dialogue_result(ev: Optional[Event], *, tz: str, now: datetime,
             "target_event_id": target_event_id}
 
 
+def topic_in_text(summary: Optional[str], text: str) -> bool:
+    """Тема от модели действительно есть в сообщении: на "не, я пойду к 18" модель может
+    придумать "Перенос на 18", на "хорошо, договорились" - "Дорогие"."""
+    t = low(text)
+    return any(w[:4] in t for w in re.findall(r"[а-яa-z]{4,}", low(summary or "")))
+
+
 def is_new_agreement(draft: Event, incoming: Optional[Event], text: str) -> bool:
     """Новое сообщение - отдельная договорённость, а не ответ на уточнение черновика:
     модель нашла create со своей темой (не "Встреча" по умолчанию и не тема черновика),
@@ -1331,10 +1338,7 @@ def is_new_agreement(draft: Event, incoming: Optional[Event], text: str) -> bool
         return False
     if summary[:4] == low(draft.summary or "")[:4]:
         return False
-    # тема должна быть в самом сообщении: на "не, я пойду к 18" модель может придумать
-    # "Перенос на 18", но это ответ про ту же встречу
-    t = low(text)
-    if not any(w[:4] in t for w in re.findall(r"[а-яa-z]{4,}", summary)):
+    if not topic_in_text(summary, text):
         return False
     return has_when(text) and has_topic(text)
 
@@ -1424,7 +1428,8 @@ def process_dialogue_message(text: str, state: DialogueState, *,
                 ev.location = incoming.location
             if incoming.attendees:
                 ev.attendees = list(dict.fromkeys(ev.attendees + incoming.attendees))
-            if incoming.summary and ev.summary in (None, *DEFAULT_SUMMARY.values()):
+            if (incoming.summary and ev.summary in (None, *DEFAULT_SUMMARY.values())
+                    and topic_in_text(incoming.summary, normalized)):
                 ev.summary = incoming.summary
         place = find_place(text)
         if place:
