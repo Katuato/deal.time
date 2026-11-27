@@ -1,0 +1,6 @@
+# Dependencies for running tests locally (not installed into the Docker image).
+-r requirements.txt
+
+aiosqlite==0.22.1
+pytest==9.2.0
+pytest-asyncio==1.5.0

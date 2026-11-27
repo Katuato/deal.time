@@ -935,7 +935,8 @@ def merge_clarification(ev: Event, reply: str, now: Optional[datetime] = None, t
                 ev.time, ev.time_ambiguous, ev.time_options = candidate, False, []
         elif ev.time_ambiguous and ev.time and hour % 12 == int(ev.time[:2]) % 12:
             ev.time, ev.time_ambiguous = candidate, False
-        elif ev.time is None:
+        else:
+            # времени еще нет или назван другой час ("в пятницу в 10" -> "лучше в 11")
             ev.time, ev.time_ambiguous = guess_hour(hour, reply), hour <= 12
     periods = {"утром": "утра", "утра": "утра", "днем": "дня", "дня": "дня", "вечером": "вечера", "вечера": "вечера", "ночью": "ночи", "ночи": "ночи"}
     if t in periods and ev.time_ambiguous and ev.time and not ev.time_options:
@@ -1236,6 +1237,10 @@ def selftest() -> None:
     assert ev.starts_at == "2026-11-05T18:00:00+03:00", ev
     ev = merge_clarification(run("завтра давай в 3"), "в 15", now)
     assert (ev.time, ev.time_ambiguous) == ("15:00", False), ev
+    ev = merge_clarification(run("в пятницу в 10:00"), "лучше в 11", now)
+    assert (ev.time, ev.time_ambiguous) == ("11:00", True), ev
+    ev = merge_clarification(run("давай в пятницу в 10"), "давай в 11 вечера", now)
+    assert (ev.time, ev.starts_at) == ("23:00", "2026-11-06T23:00:00+03:00"), ev
     assert parse_json('{"intent": "move", "summary": "Перенос", "recurrence": "по }",') == \
         {"intent": "move", "summary": "Перенос"}
     print("selftest: OK")
