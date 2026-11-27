@@ -8,11 +8,19 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from calendarr.tests.fake_db import install
+from modules import speech_runtime
 from logging_setup import LoggingContextMiddleware, ctx_event, ctx_user, setup_logging
 
 
 @pytest.fixture
-def handlers(monkeypatch):
+def speech_processor(monkeypatch):
+    processor = SimpleNamespace(transcribe=Mock(return_value="тестовая фраза"))
+    monkeypatch.setattr(speech_runtime, "initialize_stt", AsyncMock(return_value=processor))
+    return processor
+
+
+@pytest.fixture
+def handlers(monkeypatch, speech_processor):
     install()
     config = ModuleType("config")
     config.bot = SimpleNamespace(
@@ -41,7 +49,6 @@ def handlers(monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     mod.process_dialogue_message = Mock(return_value={"status": "no_event"})
-    mod._stt = SimpleNamespace(transcribe=Mock(return_value="тестовая фраза"))
     return mod
 
 
@@ -57,14 +64,14 @@ def voice_message():
 
 
 @pytest.mark.parametrize("enabled,consent", [(True, False), (False, True)])
-async def test_voice_is_ignored_without_consent_or_enabled_grant(handlers, voice_message, enabled, consent):
+async def test_voice_is_ignored_without_consent_or_enabled_grant(handlers, voice_message, speech_processor, enabled, consent):
     handlers.bot.get_business_connection.return_value.is_enabled = enabled
     handlers.has_active_consent.return_value = consent
 
     await handlers.new_message(voice_message)
 
     handlers.bot.download.assert_not_awaited()
-    handlers._stt.transcribe.assert_not_called()
+    speech_processor.transcribe.assert_not_called()
     handlers.process_dialogue_message.assert_not_called()
     handlers.record_business_chat.assert_not_awaited()
 
@@ -102,7 +109,7 @@ async def test_event_card_respects_notification_sound_preference(handlers, enabl
 
 @pytest.mark.parametrize("failure", ["download", "transcribe"])
 async def test_voice_failure_closes_buffer_without_disk_or_log_leak(
-    handlers, voice_message, monkeypatch, tmp_path, caplog, failure,
+    handlers, voice_message, speech_processor, monkeypatch, tmp_path, caplog, failure,
 ):
     monkeypatch.chdir(tmp_path)
     buffers = []
@@ -116,7 +123,7 @@ async def test_voice_failure_closes_buffer_without_disk_or_log_leak(
 
     handlers.bot.download.side_effect = download
     if failure == "transcribe":
-        handlers._stt.transcribe.side_effect = RuntimeError(private_text)
+        speech_processor.transcribe.side_effect = RuntimeError(private_text)
 
     await handlers.new_message(voice_message)
 
@@ -126,7 +133,7 @@ async def test_voice_failure_closes_buffer_without_disk_or_log_leak(
     handlers.process_dialogue_message.assert_not_called()
 
 
-async def test_voice_passes_bytes_to_transcriber_and_text_to_nlp(handlers, voice_message):
+async def test_voice_passes_bytes_to_transcriber_and_text_to_nlp(handlers, voice_message, speech_processor):
     async def download(voice, destination):
         destination.write(b"test-encoded-audio")
 
@@ -135,7 +142,7 @@ async def test_voice_passes_bytes_to_transcriber_and_text_to_nlp(handlers, voice
 
     await handlers.new_message(voice_message)
 
-    handlers._stt.transcribe.assert_called_once_with(b"test-encoded-audio")
+    speech_processor.transcribe.assert_called_once_with(b"test-encoded-audio")
     assert handlers.process_dialogue_message.call_args.kwargs["text"] == "тестовая фраза"
 
 
