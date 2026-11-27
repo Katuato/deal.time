@@ -98,7 +98,7 @@ async function loadSection(name) {
 }
 function renderApiStatus(){const loading=state.apiStatus==='loading';return `${header(false)}<main class="screen"><div class="card empty" role="status"><h2>${loading?'Подключаем Mini App…':'Не удалось подключиться к серверу'}</h2><p>${loading?'Загружаем ваши события и настройки.':esc(state.apiError)}</p>${loading?'':`<p>Проверьте API и откройте приложение внутри Telegram. Для просмотра макета добавьте <code>?demo=1</code> к адресу.</p><button class="btn wide" data-action="retry-api">Повторить</button>`}</div></main>${footer()}`;}
 function feedback(message){const el=document.getElementById('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),3100);try{tg?.HapticFeedback?.impactOccurred?.('light')}catch(_){}}
-function navigate(next){if(next==='chats' && !DEMO_MODE) loadChatAccess();screen=next;modal=null;state.filterOpen=false;render();window.scrollTo(0,0)}
+function navigate(next){cancelVoice();if(next==='chats' && !DEMO_MODE) loadChatAccess();screen=next;modal=null;state.filterOpen=false;render();window.scrollTo(0,0)}
 
 function header(quick=true){return `<header class="brand-header"><img class="logo" src="./assets/logo.png" alt="Делу.Время"><svg class="brand-wave" viewBox="0 0 315 28" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="brand-line"><stop class="wave-start"/><stop class="wave-end" offset="100%"/></linearGradient></defs><path d="M0 22C60 28 96 1 133 9c21 4 23 25 47 14S240-1 262 6c14 5 15 30 53 4"/></svg></header>${quick?`<div class="quick-actions"><button class="circle-action" data-nav="settings" title="Настройки" aria-label="Настройки">${icon('settings')}</button><button class="circle-action" data-nav="notifications" title="Уведомления" aria-label="Уведомления">${icon('bell')}</button></div>`:''}`}
 function tabs(active){return `<nav class="tabbar" aria-label="Основные разделы">${[['home','Главная'],['calendar','Календарь'],['tasks','Задачи'],['history','История']].map(([key,label])=>`<button class="tab ${active===key?'active':''}" data-nav="${key}" aria-label="${label}" aria-current="${active===key?'page':'false'}">${icon(key === 'history' ? 'info' : key)}</button>`).join('')}</nav>`}
@@ -134,11 +134,11 @@ function renderHistory(){let list=[...state.events].sort((a,b)=>b.date.localeCom
 function field(label,value){return `<div class="field"><span class="field-label">${label}</span><span class="field-value">${esc(value)}</span></div>`}
 function renderEvent(){const e=state.events.find(x=>x.id===state.selectedEventId)||state.events[0];return `${header(false)}<main class="screen">${subhead('','Карточка события',state.returnTo||'history')}<div class="event-details"><h2>${esc(e.title)}</h2>${field('Дата',dateLabel(e.date,true))}${field('Время',`${e.time} – ${e.end}`)}${field('Повторение',e.repeat)}${field('Источник',e.source)}${field('Синхронизация',e.sync)}</div><div class="event-actions"><button class="btn wide" data-action="open-google">Открыть в Google Calendar</button><button class="btn soft wide" data-action="delete-event">Удалить</button></div></main>${footer()}`}
 function renderRecognized(){return `${header(false)}<main class="screen"><div class="back-title"><button class="back-link" data-nav="notifications" aria-label="Назад">${icon('back')}</button><h1 class="section-heading">Новое распознанное событие</h1></div><p class="recognized-label">Твоё сообщение</p><div class="card message-card">Завтра надо встретиться с Дизайнером обсудить детали его работы часов в 10</div><div class="found-ribbon">${icon('star')} Я нашёл событие</div><div class="event-details"><h2>Встретиться с Дизайнером</h2>${field('Дата','18 октября 2026, воскресенье')}${field('Время','10:00')}${field('Напоминание','Добавить напоминание')}</div><div class="event-actions"><button class="btn wide" data-action="save-recognized">Сохранить событие</button><div class="btn-row"><button class="btn soft" data-action="dismiss-recognized">Удалить</button><button class="btn soft" data-action="recognized-details">Подробнее</button></div></div></main>${footer()}`}
-function renderTaskNew(){return `${header(false)}<main class="screen">${subhead('checked','Новая задача','tasks')}<form class="form" id="task-form"><label>Название задачи<input class="form-input" name="title" required maxlength="120" placeholder="Что нужно сделать?"></label><div class="btn-row"><label>Дата<input class="form-input" type="date" name="date" required value="${state.selectedDate}"></label><label>Время<input class="form-input" type="time" name="time" required value="10:00"></label></div><button class="btn wide" type="submit">Добавить задачу</button></form></main>${footer()}`}
+function renderTaskNew(){return `${header(false)}<main class="screen">${subhead('checked','Новая задача','tasks')}<form class="form" id="task-form"><label>Название задачи<input class="form-input" name="title" required maxlength="120" placeholder="Что нужно сделать?"></label><div class="datetime-fields"><label>Дата<input class="form-input" type="date" name="date" required value="${state.selectedDate}"></label><label>Время<input class="form-input" type="time" name="time" required value="10:00"></label></div><button class="btn wide" type="submit">Добавить задачу</button></form></main>${footer()}`}
 function renderTaskDetail(){const t=state.tasks.find(x=>x.id===state.selectedTaskId);if(!t)return renderTasks();return `${header(false)}<main class="screen">${subhead('checked','Моя задача','tasks')}<div class="event-details"><h2>${esc(t.title)}</h2>${field('Дата',dateLabel(t.date,true))}${field('Время',t.time)}${field('Статус',t.done?'Выполнена':'Активная')}</div><div class="event-actions"><button class="btn wide" data-action="toggle-task">${t.done?'Вернуть в активные':'Отметить выполненной'}</button><button class="btn soft wide" data-action="delete-task">Удалить задачу</button></div></main>${footer()}`}
 function renderGoogle(){return `${header(false)}<main class="screen">${subhead('calendar','Google Calendar','settings')}<div class="card"><h2 class="section-heading">${state.googleConnected?'Календарь подключён':'Подключить календарь'}</h2><p class="muted" style="font-size:13px;line-height:1.5">${state.googleConnected?'События могут синхронизироваться с Google Calendar.':'Подключите Google Calendar, чтобы сохранять найденные события.'}</p><button class="btn ${state.googleConnected?'soft':'teal'} wide" data-action="google-connect">${state.googleConnected?'Отключить':'Подключить'}</button></div></main>${footer()}`}
 function renderInfo(){const copy={privacy:['Согласие и данные','Приложение показывает события и задачи из разрешённых чатов. Управлять доступом к чатам можно в настройках.'],faq:['Часто задаваемые вопросы','Как добавить событие? Нажмите «Разобрать» на главной и опишите встречу. Как открыть календарь? Перейдите на вкладку с иконкой календаря.'],support:['Поддержка','Если возник вопрос, напишите владельцу бота в Telegram.'],help:['Как это работает?','Делу.Время помогает находить договорённости в сообщениях, создавать события и напоминания. Разрешите нужные чаты, а затем проверяйте найденные встречи на главной.']}[screen];return `${header(false)}<main class="screen">${subhead('info',copy[0],screen==='help'?'home':'settings')}<div class="card"><p style="font-size:13px;line-height:1.6">${copy[1]}</p></div></main>${footer()}`}
-function renderModal(){if(!modal)return '';if(modal==='parse')return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true" aria-label="Разобрать сообщение"><h2>Разобрать сообщение</h2><p>Опишите встречу. По кнопке ниже событие будет создано и появится в истории.</p><form id="parse-form" class="form"><textarea class="form-input" name="message" required placeholder="Завтра в 10:00 встреча с дизайнером"></textarea><div class="btn-row"><button type="button" class="btn soft" data-action="modal-close">Отмена</button><button type="submit" class="btn blue">Создать событие</button></div></form></div></div>`;if(modal==='google')return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true"><h2>Открыть ссылку?</h2><div class="link-card">https://calendar.google.com</div><div class="btn-row"><button class="btn soft" data-action="modal-close">Отмена</button><button class="btn blue" data-action="confirm-google">Открыть</button></div></div></div>`;return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true"><h2>${esc(modal.title)}</h2><p>${esc(modal.text)}</p><div class="btn-row"><button class="btn soft" data-action="modal-close">Отмена</button><button class="btn blue" data-action="${modal.action}">${esc(modal.button)}</button></div></div></div>`}
+function renderModal(){if(!modal)return '';if(modal==='voice' && voiceSession)return renderVoiceDialog();if(modal==='parse')return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true" aria-label="Разобрать сообщение"><h2>Разобрать сообщение</h2><p>Опишите встречу. По кнопке ниже событие будет создано и появится в истории.</p><form id="parse-form" class="form"><textarea class="form-input" name="message" required placeholder="Завтра в 10:00 встреча с дизайнером"></textarea><div class="btn-row"><button type="button" class="btn soft" data-action="modal-close">Отмена</button><button type="submit" class="btn blue">Создать событие</button></div></form></div></div>`;if(modal==='google')return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true"><h2>Открыть ссылку?</h2><div class="link-card">https://calendar.google.com</div><div class="btn-row"><button class="btn soft" data-action="modal-close">Отмена</button><button class="btn blue" data-action="confirm-google">Открыть</button></div></div></div>`;return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true"><h2>${esc(modal.title)}</h2><p>${esc(modal.text)}</p><div class="btn-row"><button class="btn soft" data-action="modal-close">Отмена</button><button class="btn blue" data-action="${modal.action}">${esc(modal.button)}</button></div></div></div>`}
 function render(){const pages={onboarding:renderOnboarding,home:renderHome,calendar:renderCalendar,tasks:renderTasks,settings:renderSettings,stats:renderStats,chats:renderChats,theme:renderTheme,notifications:renderNotifications,history:renderHistory,event:renderEvent,recognized:renderRecognized,'task-new':renderTaskNew,'task-detail':renderTaskDetail,google:renderGoogle,privacy:renderInfo,faq:renderInfo,support:renderInfo,help:renderInfo};app.innerHTML=(pages[screen]||renderHome)()+renderModal();}
 
 app.addEventListener('click',async ev=>{
@@ -156,7 +156,7 @@ app.addEventListener('click',async ev=>{
   const theme=ev.target.closest('[data-theme]');if(theme){state.theme=theme.dataset.theme;persist();render();feedback('Тема изменена');return}
   const action=ev.target.closest('[data-action]');if(!action)return;
   const name=action.dataset.action;
-  if(name==='modal-close'){if(ev.target===action||action.tagName==='BUTTON'){modal=null;render()}return}
+  if(name==='modal-close'){if(ev.target===action||action.tagName==='BUTTON'){cancelVoice();modal=null;render()}return}
   if(name==='reload-chats'){await loadChatAccess();return}
   if(name==='retry-section'){await loadSection(action.dataset.section);return}
   if(name==='retry-api'){loadIntegrationData();return}
@@ -166,6 +166,7 @@ app.addEventListener('click',async ev=>{
   if(name==='toggle-notifications'){const enabled=!state.notificationsEnabled;if(!DEMO_MODE){try{await DealenderApi.notificationSettings(enabled);state.notificationsEnabled=enabled;render();feedback(enabled?'Уведомления включены':'Уведомления выключены')}catch(error){feedback(error.message)}return}state.notificationsEnabled=enabled;persist();render();feedback(state.notificationsEnabled?'Уведомления включены':'Уведомления выключены');return}
   if(name==='filter'){state.filterOpen=!state.filterOpen;render();return}
   if(name==='parse'){modal='parse';render();return}
+  if(name==='voice-finish'){finishVoice();return}
   if(name==='voice'){startVoice();return}
   if(name==='exclude-chat'){modal={title:'Исключённые чаты',text:'Выбранные чаты будут исключены из распознавания событий.',action:'confirm-exclude',button:'Понятно'};render();return}
   if(name==='confirm-exclude'){modal=null;render();return}
@@ -198,7 +199,144 @@ app.addEventListener('submit',async ev=>{
     const match=message.match(/(?:в\s*)?(\d{1,2})[:.](\d{2})/);const time=match?`${match[1].padStart(2,'0')}:${match[2]}`:'10:00';const title=message.length>65?message.slice(0,62)+'…':message;const item={id:id(),title,date:state.selectedDate,time,end:'11:00',repeat:'Не повторяется',source:'Введено вручную',sync:'Демо-режим',chat:'Вручную',status:'Создано'};state.events.push(item);state.selectedEventId=item.id;state.returnTo='history';persist();navigate('event');feedback('Демо-событие добавлено');
   }
 });
-function startVoice(){const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Recognition){feedback('Запись голоса недоступна в этом браузере. Используйте «Разобрать».');return}const recognition=new Recognition();recognition.lang='ru-RU';recognition.interimResults=false;recognition.onresult=ev=>{modal='parse';render();document.querySelector('#parse-form textarea').value=ev.results[0][0].transcript;feedback('Голос распознан')};recognition.onerror=()=>feedback('Не удалось распознать речь');recognition.start();feedback('Говорите — я слушаю')}
+let voiceSession = null;
+const recordingLimitMs = 40000;
+
+function renderVoiceDialog() {
+  const {phase, message} = voiceSession;
+  const label = {recording: 'Завершить и распознать', ready: 'Распознать запись', listening: 'Завершить ввод'}[phase];
+  return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true" aria-label="Голосовой ввод">
+    <h2>Голосовой ввод</h2><p role="status">${esc(message)}</p>
+    <div class="btn-row"><button class="btn soft" data-action="modal-close">Отмена</button>
+    ${label ? `<button class="btn blue" data-action="voice-finish">${label}</button>` : ''}</div></div></div>`;
+}
+
+function cancelVoice() {
+  const session = voiceSession;
+  if (!session) return;
+  voiceSession = null;
+  clearTimeout(session.timer);
+  session.abort.abort();
+  if (session.recorder?.state === 'recording') session.recorder.stop();
+  session.stream?.getTracks().forEach(track => track.stop());
+  session.recognition?.abort();
+}
+
+function showVoiceText(session, text, hint) {
+  if (session !== voiceSession) return;
+  cancelVoice();
+  modal = 'parse';
+  render();
+  const input = app.querySelector('#parse-form textarea');
+  input.value = text;
+  if (hint) {
+    const note = app.querySelector('.modal-card p');
+    note.textContent = hint;
+  }
+  input.focus();
+}
+
+function voiceProblem(session, error) {
+  const denied = ['NotAllowedError', 'SecurityError', 'not-allowed', 'service-not-allowed'].includes(error);
+  const hint = denied ? 'Нет доступа к микрофону. Разрешите его для Telegram в настройках телефона или используйте диктовку клавиатуры.'
+                      : 'Запись недоступна. Введите текст или включите диктовку на клавиатуре.';
+  showVoiceText(session, '', hint);
+}
+
+function startBrowserRecognition(session) {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) return voiceProblem(session, 'unavailable');
+  const recognition = session.recognition = new Recognition();
+  recognition.lang = 'ru-RU';
+  recognition.interimResults = false;
+  recognition.onresult = e => showVoiceText(session, e.results[0][0].transcript, '');
+  recognition.onerror = e => voiceProblem(session, e.error);
+  recognition.onend = () => { if (voiceSession === session) showVoiceText(session, '', 'Речь не распознана. Повторите ввод или используйте диктовку клавиатуры.'); };
+  recognition.start();
+  session.phase = 'listening';
+  session.message = 'Говорите. Распознанный текст можно будет отредактировать.';
+  render();
+}
+
+async function sendVoice(session) {
+  if (voiceSession !== session || !session.blob || session.phase === 'sending') return;
+  session.phase = 'sending';
+  session.message = 'Распознаём запись…';
+  render();
+  try {
+    const {text} = await DealenderApi.transcribeVoice(session.blob, session.abort.signal);
+    if (typeof text !== 'string' || !text.trim()) throw Error('Речь не распознана.');
+    showVoiceText(session, text, '');
+  } catch (error) {
+    if (voiceSession !== session) return;
+    session.phase = 'ready';
+    session.message = error.message;
+    render();
+  }
+}
+
+function finishVoice() {
+  const session = voiceSession;
+  if (!session) return;
+  if (session.phase === 'ready') return sendVoice(session);
+  if (session.phase === 'listening') return session.recognition.stop();
+  if (session.recorder?.state === 'recording') {
+    session.sendAfterStop = true;
+    session.recorder.stop();
+  }
+}
+
+async function startVoice() {
+  if (voiceSession) return;
+  const session = voiceSession = {phase: 'opening', message: 'Запрашиваем доступ к микрофону…', abort: new AbortController()};
+  modal = 'voice';
+  render();
+  try {
+    const mime = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
+      .find(type => window.MediaRecorder?.isTypeSupported?.(type));
+    if (DEMO_MODE || !mime || !navigator.mediaDevices?.getUserMedia) return startBrowserRecognition(session);
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    if (session !== voiceSession || document.hidden) {
+      stream.getTracks().forEach(track => track.stop());
+      if (session === voiceSession) { cancelVoice(); modal = null; render(); }
+      return;
+    }
+    session.stream = stream;
+    const recorder = session.recorder = new MediaRecorder(stream, {mimeType:mime, audioBitsPerSecond:64000});
+    const chunks = [];
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+    recorder.onerror = () => voiceProblem(session, 'recorder');
+    recorder.onstop = () => {
+      clearTimeout(session.timer);
+      stream.getTracks().forEach(track => track.stop());
+      if (session !== voiceSession) return;
+      session.blob = new Blob(chunks, {type:recorder.mimeType || mime});
+      if (!session.blob.size || session.blob.size > 2097152) {
+        showVoiceText(session, '', 'Не удалось сохранить запись. Запишите фразу короче или используйте диктовку клавиатуры.');
+        return;
+      }
+      session.phase = 'ready';
+      session.message = 'Запись завершена. Отправить её на распознавание?';
+      if (session.sendAfterStop) sendVoice(session); else render();
+    };
+    recorder.start();
+    session.phase = 'recording';
+    session.message = 'Идёт запись. До 40 секунд. Нажмите «Завершить и распознать», чтобы отправить голос на сервер.';
+    session.timer = setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, recordingLimitMs);
+    render();
+  } catch (error) {
+    voiceProblem(session, error.name);
+  }
+}
+
+window.addEventListener('pagehide', () => {
+  if (voiceSession) { cancelVoice(); modal = null; render(); }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && voiceSession && ['recording','listening'].includes(voiceSession.phase)) {
+    cancelVoice(); modal = null; render();
+  }
+});
 
 /* History, event details and access settings. */
 state.historyRange ||= { from: '', to: '' };
@@ -266,7 +404,7 @@ function renderEventEdit() {
     <form id="event-edit-form" class="form">
       <label>Название<input class="form-input" name="title" required maxlength="120" value="${esc(event.title)}"></label>
       <label>Дата<input class="form-input" type="date" name="date" required value="${esc(event.date)}"></label>
-      <div class="btn-row"><label>Начало<input class="form-input" type="time" name="time" required value="${esc(event.time)}"></label><label>Конец<input class="form-input" type="time" name="end" required value="${esc(event.end)}"></label></div>
+      <div class="datetime-fields"><label>Начало<input class="form-input" type="time" name="time" required value="${esc(event.time)}"></label><label>Конец<input class="form-input" type="time" name="end" required value="${esc(event.end)}"></label></div>
       <label>Повторение<select class="form-input" name="repeat">${repeatOptions.map(value => `<option ${event.repeat === value ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></label>
       <button class="btn wide" type="submit">Сохранить изменения</button>
     </form>
@@ -303,8 +441,8 @@ function renderLiveChats() {
       (authorized?'<a href="tg://settings/business">Отозвать доступ</a>':'')+'</div>').join('') || '<p>Список пуст.</p>';
   }
   return `${header(false)}<main class="screen">${subhead('chats','Доступ к чатам','settings')}
-    <div class="card">${list}<p>Чтобы изменить доступ, откройте настройки Telegram → Telegram Business → Чат-боты.</p>
-    ${settings}<button class="btn soft wide" data-action="reload-chats">Обновить список</button></div></main>${footer()}`;
+    <div class="card live-chats">${list}<p>Чтобы изменить доступ, откройте настройки Telegram → Telegram Business → Чат-боты.</p>
+    <div class="chat-actions">${settings}<button class="btn soft wide" data-action="reload-chats">Обновить список</button></div></div></main>${footer()}`;
 }
 renderChats = function () {
   const allowed = state.chats || [];

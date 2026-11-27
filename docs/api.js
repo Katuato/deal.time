@@ -9,7 +9,7 @@
 
     const headers = new Headers(options.headers || {});
     headers.set('Authorization', `tma ${initData}`);
-    if (options.body !== undefined) headers.set('Content-Type', 'application/json');
+    if (options.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
 
     let response;
     try {
@@ -52,6 +52,9 @@
       } while (cursor);
       return [...events.values()];
     },
+    transcribeVoice: (blob, signal) => request('/voice/transcribe', {
+      method: 'POST', headers: {'Content-Type': blob.type}, body: blob, signal
+    }),
     chats: () => request('/chats'),
     parseEvent: message => request('/events/parse', { method: 'POST', body: json({ message }) }),
     updateEvent: (eventId, patch) => request(`/events/${encodeURIComponent(eventId)}`, { method: 'PATCH', body: json(patch) }),

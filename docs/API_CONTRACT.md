@@ -23,6 +23,7 @@ Mini App обращается к HTTPS API по адресу `/api/v1`. В ка�
 | `GET /notifications` | Вернуть массив `notifications` и переключатель `enabled` (true/false). Поля уведомления — `id, title, text, extra, kind, unread`. Для перехода к событию или задаче нужен `eventId` или `taskId`. |
 | `PATCH /notifications/{id}` · `PUT /notifications/settings` | Отметить уведомление прочитанным по `{"unread":false}` или сохранить настройку пользователя по `{"enabled":true}` либо `{"enabled":false}`. |
 | `GET /google/status` · `POST /google/connect` · `DELETE /google/connection` | Вернуть `connected` (true/false), выдать HTTPS-ссылку Google в поле `authorization_url` или отключить календарь. Синхронизацию событий с Google выполняет сервер. |
+| `POST /voice/transcribe` | Принять бинарное аудио WebM/Opus, Ogg или MP4/AAC с его Content-Type, до 2 МиБ и 45 секунд. Вернуть распознанную речь в поле `text`. Событие создаётся после подтверждения пользователя. |
 | `GET /chats` | Вернуть `{"scope":"authorized","chats":[{"id":"19","title":"Рабочий чат"}]}`. Значения `scope`: `authorized` — доступ подтверждён, `observed` — из чата приходили сообщения, `unknown` — доступ неизвестен. |
 
 Ответы — JSON. При успешном удалении — HTTP 204 без тела. При ошибке — соответствующий HTTP-статус и `{"error":{"message":"Причина ошибки"}}`.
