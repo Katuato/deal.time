@@ -179,3 +179,32 @@ def test_console_logging_hides_exception_details_and_disables_file_logging(monke
     assert "RuntimeError" in output
     assert private_text not in output
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.fixture
+def business_update():
+    return SimpleNamespace(id="business-connection", is_enabled=True, user=SimpleNamespace(id=7))
+
+
+async def test_business_connect_continues_setup_like_google(handlers, business_update, monkeypatch):
+    setup = SimpleNamespace(continue_setup=AsyncMock())
+    monkeypatch.setitem(sys.modules, "tg_bot.user_end", setup)
+    handlers.get_buss_conn.return_value = None
+    handlers.add_buss_conn.return_value = True
+
+    await handlers.check_business_conn(business_update)
+
+    handlers.add_buss_conn.assert_awaited_once_with(user_id=7, business_token="business-connection", status=True)
+    setup.continue_setup.assert_awaited_once_with(7, business_just_connected=True)
+    handlers.bot.send_message.assert_not_awaited()
+
+
+async def test_repeated_business_update_does_not_repeat_setup(handlers, business_update, monkeypatch):
+    setup = SimpleNamespace(continue_setup=AsyncMock())
+    monkeypatch.setitem(sys.modules, "tg_bot.user_end", setup)
+    handlers.get_buss_conn.return_value = SimpleNamespace(business_token="business-connection", status=True)
+
+    await handlers.check_business_conn(business_update)
+
+    handlers.add_buss_conn.assert_not_awaited()
+    setup.continue_setup.assert_not_awaited()

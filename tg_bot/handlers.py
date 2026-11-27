@@ -67,14 +67,10 @@ async def check_business_conn(bus_conn: types.BusinessConnection):
     if not await add_buss_conn(user_id=user_id, business_token=bus_conn.id, status=True):
         await bot.send_message(chat_id=user_id, text="Не удалось подключить бота.")
         return
-    markup = None
-    text = "Вы успешно подключили бота к своему аккаунту!"
-    if connection is None or connection.google_token is None:
-        markup = keyb.google_conn_kb()
-        text += "\n\nПожалуйста, подключите Google Календарь."
-    enabled = await notifications_enabled(user_id)
-    if markup is not None or enabled:
-        await bot.send_message(chat_id=user_id, text=text, reply_markup=markup, disable_notification=not enabled)
+    # как после подключения Google: всё подключено — то же сообщение, что на /start,
+    # иначе подтверждение и следующий шаг настройки
+    from tg_bot.user_end import continue_setup  # user_end тянет календарь и роутеры
+    await continue_setup(user_id, business_just_connected=True)
 
 
 @rt.callback_query(F.data=="google_connect")

@@ -101,3 +101,46 @@ async def test_start_with_consent_displays_calendar_and_business_status(onboardi
     assert "Google Календарь: подключён" in bot.send_message.await_args.kwargs["text"]
     assert "Бизнес-чаты: подключены" in bot.send_message.await_args.kwargs["text"]
     bot.send_rich_message.assert_not_awaited()
+
+
+def _all_connected(models, bot, *, google_token="token"):
+    models.has_active_consent.return_value = True
+    models.get_user.return_value = SimpleNamespace(timezone="Europe/Moscow")
+    models.get_buss_conn.return_value = SimpleNamespace(
+        user_id=7, business_token="business", google_token=google_token, status=True)
+    bot.get_business_connection.return_value = SimpleNamespace(is_enabled=True, user=SimpleNamespace(id=7))
+
+
+async def test_business_connect_with_google_shows_start_message(onboarding, monkeypatch):
+    module, models, bot = onboarding
+    _all_connected(models, bot)
+    monkeypatch.setattr(module, "check_connection", AsyncMock(return_value={"status": "success"}))
+
+    await module.continue_setup(7, business_just_connected=True)
+
+    texts = [call.kwargs["text"] for call in bot.send_message.await_args_list]
+    assert len(texts) == 1 and "✅ Всё подключено" in texts[0]
+
+
+async def test_business_connect_without_google_confirms_and_asks_for_calendar(onboarding):
+    module, models, bot = onboarding
+    _all_connected(models, bot, google_token=None)
+
+    await module.continue_setup(7, business_just_connected=True)
+
+    calls = bot.send_message.await_args_list
+    assert [call.kwargs["text"] for call in calls][0] == module.BUSINESS_CONNECTED
+    assert "google-календарём" in calls[1].kwargs["text"]
+    assert calls[1].kwargs["reply_markup"] is not None
+
+
+async def test_business_connect_before_timezone_asks_for_timezone(onboarding):
+    module, models, bot = onboarding
+    _all_connected(models, bot)
+    models.get_user.return_value = SimpleNamespace(timezone=None)
+
+    await module.continue_setup(7, business_just_connected=True)
+
+    calls = bot.send_message.await_args_list
+    assert [call.kwargs["text"] for call in calls] == [module.BUSINESS_CONNECTED, module.TZ_QUESTION]
+    models.get_buss_conn.assert_not_awaited()

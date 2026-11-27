@@ -120,19 +120,33 @@ async def send_ready(user_id: int):
 
 
 GOOGLE_CONNECTED = "Google Календарь успешно подключён ✅"
+BUSINESS_CONNECTED = "Бот успешно подключён к вашему аккаунту ✅"
 
 
-async def continue_setup(user_id: int, google_just_connected: bool = False):
+async def continue_setup(user_id: int, google_just_connected: bool = False,
+                         business_just_connected: bool = False):
     '''следующий шаг после согласия и часового пояса: подключение бота и google-календаря.
-    google_just_connected=True — вызов из OAuth-колбэка: если всё подключено, пользователь получает
-    то же сообщение, что и на /start; иначе — «Google Календарь подключён» и следующий шаг'''
-    async def confirm_google():
+    google_just_connected=True — вызов из OAuth-колбэка, business_just_connected=True — из
+    подключения бизнес-бота: если всё подключено, пользователь получает то же сообщение, что и
+    на /start; иначе — подтверждение подключения и следующий шаг'''
+    async def confirm():
         if google_just_connected:
             await bot.send_message(chat_id=user_id, text=GOOGLE_CONNECTED)
+        if business_just_connected:
+            await bot.send_message(chat_id=user_id, text=BUSINESS_CONNECTED)
+
+    if business_just_connected:
+        # бота могли подключить раньше, чем пользователь выбрал пояс в /start:
+        # после выбора пояса save_timezone сама продолжит настройку
+        user = await get_user(user_id)
+        if user is None or not user.timezone:
+            await confirm()
+            await bot.send_message(chat_id=user_id, text=TZ_QUESTION, reply_markup=keyb.timezone_kb())
+            return
 
     connection = await get_buss_conn(user_id)
     if connection is None or connection.business_token is None:
-        await confirm_google()
+        await confirm()
         await message_buss_conn(user_id)
         return
     try:
@@ -141,23 +155,24 @@ async def continue_setup(user_id: int, google_just_connected: bool = False):
     except Exception as e:
         if "business connection not found" not in str(e):
             logger.warning("Не удалось проверить подключение Telegram Business (%s)", type(e).__name__)
-            await confirm_google()
+            await confirm()
             await bot.send_message(chat_id=user_id, text="Произошла непредвиденная ошибка.")
             return
         business, lost = None, True
     if lost:
-        await confirm_google()
+        await confirm()
         await bot.send_message(chat_id=user_id, text="Ваше подключение устарело/не найдено.\n"
                                "Нажмите кнопку ниже, перейдите в раздел 'Автоматизация чатов', и добавьте нашего бота: <code>@deluvremyabot</code>",
                                reply_markup=goto_settings_button())
         return
     if business.user.id != user_id:
-        await confirm_google()
+        await confirm()
         await message_buss_conn(user_id)
         return
     if connection.status is None or connection.status is False:
         await add_buss_conn(user_id=connection.user_id, business_token=connection.business_token, status=True)
     if connection.google_token is None:
+        await confirm()
         await bot.send_message(chat_id=user_id, text="Пожалуйста, свяжите бота с google-календарём", reply_markup=keyb.google_conn_kb())
     else:
         await send_ready(user_id)
