@@ -3,7 +3,10 @@ app.delyvremya.online {
 		protocols tls1.3
 	}
 
-	@api path /api/v1 /api/v1/*
+	@api {
+		path /api/v1 /api/v1/*
+		not path /api/v1/voice/transcribe
+	}
 	@oauth path /oauthcallback
 	@frontend path / /index.html /styles.css /config.js /api.js /app.js /assets/*
 
@@ -13,6 +16,12 @@ app.delyvremya.online {
 		Content-Security-Policy "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' https://web.telegram.org; base-uri 'none'; form-action 'self'"
 	}
 
+	handle /api/v1/voice/transcribe {
+		request_body {
+			max_size 2097152
+		}
+		reverse_proxy delu-backend:8080
+	}
 	handle @api {
 		request_body {
 			max_size 16KB
