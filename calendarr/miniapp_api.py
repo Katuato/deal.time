@@ -24,6 +24,7 @@ from calendarr.nlp_adapter import build_event_data
 from calendarr.storage import DBTokenStorage
 from config import bot
 from database.db import Chat, Connection, Consent, Event, EventNoticeRead, Operation, Task, User, async_session
+from modules.speech_runtime import FORMATS, MAX_AUDIO_BYTES, SpeechBusy, transcribe_miniapp
 from modules.nlp_module import DEFAULT_TZ, MAX_TEXT_LEN, DialogueState, process_dialogue_message, to_event_record
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,29 @@ def zone(name: str | None) -> ZoneInfo:
         return ZoneInfo(name or DEFAULT_TZ)
     except (ZoneInfoNotFoundError, ValueError):
         return ZoneInfo(DEFAULT_TZ)
+
+
+@api.post("/voice/transcribe")
+async def voice_transcript(request: Request, user: Owner):
+    mime = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if mime not in FORMATS:
+        raise HTTPException(415, "Формат записи не поддерживается.")
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > MAX_AUDIO_BYTES:
+            raise HTTPException(413, "Запись слишком большая. Продиктуйте фразу короче.")
+        data.extend(chunk)
+    if not data:
+        raise HTTPException(422, "Пустая запись. Попробуйте ещё раз.")
+    try:
+        text = await transcribe_miniapp(bytes(data), FORMATS[mime])
+    except SpeechBusy:
+        raise HTTPException(429, "Распознавание занято. Повторите через несколько секунд.") from None
+    except ValueError as exc:
+        raise HTTPException(422, "Не удалось прочитать запись. Продиктуйте короткую фразу ещё раз.") from exc
+    if not text.strip():
+        raise HTTPException(422, "Речь не распознана. Попробуйте ещё раз.")
+    return {"text": text.strip()}
 
 
 @api.get("/me")
