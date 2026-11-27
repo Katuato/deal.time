@@ -355,7 +355,6 @@ def resolve_date(phrase: Optional[str], now: datetime) -> Optional[datetime]:
     if p in WD_ACC:
         target = WD_ACC.index(p)
         return (base + timedelta(days=(target - base.weekday()) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-    import dateparser
     m = re.match(r"(\d{1,2}) числа", p)
     if m:
         y, mo, d = base.year, base.month, int(m.group(1))
@@ -379,6 +378,7 @@ def resolve_date(phrase: Optional[str], now: datetime) -> Optional[datetime]:
             return dt
         except ValueError:
             return None
+    import dateparser   # только здесь: простые даты выше разбираются без него
     is_next = "следующ" in p
     p = re.sub(r"следующ\w+\s+", "", p)
     dt = dateparser.parse(p, languages=["ru"], settings={"RELATIVE_BASE": base, "PREFER_DATES_FROM": "future"})
