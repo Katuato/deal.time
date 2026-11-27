@@ -119,10 +119,20 @@ async def send_ready(user_id: int):
         "одной кнопкой событие попадает в календарь."))
 
 
-async def continue_setup(user_id: int):
-    '''следующий шаг после согласия и часового пояса: подключение бота и google-календаря'''
+GOOGLE_CONNECTED = "Google Календарь успешно подключён ✅"
+
+
+async def continue_setup(user_id: int, google_just_connected: bool = False):
+    '''следующий шаг после согласия и часового пояса: подключение бота и google-календаря.
+    google_just_connected=True — вызов из OAuth-колбэка: если всё подключено, пользователь получает
+    то же сообщение, что и на /start; иначе — «Google Календарь подключён» и следующий шаг'''
+    async def confirm_google():
+        if google_just_connected:
+            await bot.send_message(chat_id=user_id, text=GOOGLE_CONNECTED)
+
     connection = await get_buss_conn(user_id)
     if connection is None or connection.business_token is None:
+        await confirm_google()
         await message_buss_conn(user_id)
         return
     try:
@@ -131,15 +141,18 @@ async def continue_setup(user_id: int):
     except Exception as e:
         if "business connection not found" not in str(e):
             logger.warning("Не удалось проверить подключение Telegram Business (%s)", type(e).__name__)
+            await confirm_google()
             await bot.send_message(chat_id=user_id, text="Произошла непредвиденная ошибка.")
             return
         business, lost = None, True
     if lost:
+        await confirm_google()
         await bot.send_message(chat_id=user_id, text="Ваше подключение устарело/не найдено.\n"
                                "Нажмите кнопку ниже, перейдите в раздел 'Автоматизация чатов', и добавьте нашего бота: <code>@deluvremyabot</code>",
                                reply_markup=goto_settings_button())
         return
     if business.user.id != user_id:
+        await confirm_google()
         await message_buss_conn(user_id)
         return
     if connection.status is None or connection.status is False:

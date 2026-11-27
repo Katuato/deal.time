@@ -19,7 +19,7 @@ from database.models import (
 )
 from modules.nlp_module import (process_dialogue_message, DialogueState, DEFAULT_TZ, resolve_date,
                                  merge_clarification, get_zone, Event as NlpEvent, fill_datetimes,
-                                 to_event_record)
+                                 to_event_record, MAX_TEXT_LEN)
 
 import tg_bot.keyboards as keyb
 
@@ -94,10 +94,31 @@ async def google_connect(call: types.CallbackQuery):
     await call.message.edit_text(text="Пожалуйста, перейдите по ссылке ниже, чтобы подключить календарь!", reply_markup=kb.as_markup())
     await call.answer()
 
+# Сообщения одного чата обрабатываются строго по очереди. aiogram запускает каждое обновление
+# отдельной задачей, и без блокировки текст, пришедший во время распознавания голосового,
+# успевал в NLP раньше него: голосовое потом отклонялось как «не по порядку» и терялось.
+_chat_locks: dict[tuple[str, int], list] = {}  # ключ -> [блокировка, сколько сообщений её ждут/держат]
+
+
 @rt.business_message()
 async def new_message(msg: types.Message):
     if msg.chat.type != "private" or not msg.business_connection_id:
         return
+    # блокировку берём до первого await: asyncio.Lock отдаёт её по порядку ожидания,
+    # то есть в порядке прихода обновлений
+    key = (msg.business_connection_id, msg.chat.id)
+    entry = _chat_locks.setdefault(key, [asyncio.Lock(), 0])
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            await _handle_message(msg)
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0:
+            _chat_locks.pop(key, None)  # больше никто не ждёт — не копим блокировки
+
+
+async def _handle_message(msg: types.Message):
     try:
         buss_conn = await bot.get_business_connection(msg.business_connection_id)
     except Exception as error:
@@ -119,11 +140,19 @@ async def new_message(msg: types.Message):
     text = await _transcribe_voice(msg.voice) if msg.voice else msg.text
     if not text or not text.strip():
         return
+    # длинное голосовое или текст длиннее лимита NLP отклонил бы целиком (ValueError);
+    # extract_entities и так смотрит только на первые MAX_TEXT_LEN символов
+    text = text.strip()[:MAX_TEXT_LEN]
     tz = user.timezone if user is not None and user.timezone else DEFAULT_TZ
     dialogue_state = dialogue_states.setdefault(dialogue_key, DialogueState())
+    # Telegram ставит дату с точностью до секунды; если сообщение всё же «старше» предыдущего,
+    # считаем его отправленным одновременно, а не отбрасываем
+    message_time = msg.date
+    if dialogue_state.last_message_time and message_time < dialogue_state.last_message_time:
+        message_time = dialogue_state.last_message_time
     try:
         answ = await asyncio.to_thread(
-            process_dialogue_message, text=text, state=dialogue_state, message_time=msg.date, tz=tz,
+            process_dialogue_message, text=text, state=dialogue_state, message_time=message_time, tz=tz,
         )
     except ValueError:
         logger.warning("NLP отклонил сообщение")

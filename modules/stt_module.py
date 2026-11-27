@@ -49,10 +49,12 @@ class STTProcessor:
         if not size:
             raise ValueError("Аудиофайл пустой")
         
-        # Распознавание
+        # Распознавание. return_timestamps=True обязателен для аудио длиннее 30 секунд:
+        # с False Whisper выбрасывает ValueError (long-form generation требует таймкодов).
+        # Короткие записи распознаются как раньше, в результате берём только текст.
         result = self.pipe(
             audio_path,
-            return_timestamps=False,
+            return_timestamps=True,
             generate_kwargs={"language": language, "task": "transcribe"}
         )
         

@@ -19,10 +19,8 @@ def server(monkeypatch):
     monkeypatch.setattr(calendarr, "oauth", oauth, raising=False)
     monkeypatch.setitem(sys.modules, "calendarr.storage", SimpleNamespace(DBTokenStorage=lambda: storage))
     monkeypatch.setitem(sys.modules, "database.db", SimpleNamespace(check_database=AsyncMock()))
-    monkeypatch.setitem(sys.modules, "database.models", SimpleNamespace(
-        has_active_consent=AsyncMock(return_value=True),
-        notifications_enabled=AsyncMock(return_value=True),
-    ))
+    monkeypatch.setitem(sys.modules, "database.models", SimpleNamespace(has_active_consent=AsyncMock(return_value=True)))
+    monkeypatch.setitem(sys.modules, "tg_bot.user_end", SimpleNamespace(continue_setup=AsyncMock()))
 
     path = Path(__file__).resolve().parents[1] / "oauth_server.py"
     spec = importlib.util.spec_from_file_location("_test_oauth_server", path)
@@ -61,6 +59,8 @@ def test_oauth_uses_configured_path_and_keeps_privacy_headers(server):
         assert "test-token" not in response.text
         module.oauth.exchange_code.assert_awaited_once_with("test-code", "test-state")
         storage.save_user_token.assert_awaited_once_with(7, {"access_token": "test-token"})
+        # после подключения — то же сообщение, что на /start (или следующий шаг настройки)
+        sys.modules["tg_bot.user_end"].continue_setup.assert_awaited_once_with(7, google_just_connected=True)
 
 
 def test_oauth_callback_requires_consent_before_saving_token(server):
@@ -71,16 +71,7 @@ def test_oauth_callback_requires_consent_before_saving_token(server):
         assert response.status_code == 403
         storage.save_user_token.assert_not_awaited()
         module.config.bot.send_message.assert_not_awaited()
-
-
-def test_oauth_respects_disabled_notifications(server):
-    module, storage = server
-    module.notifications_enabled.return_value = False
-    with TestClient(module.create_app()) as client:
-        response = client.get("/oauthcallback", params={"code": "test-code", "state": "test-state"})
-        assert response.status_code == 200
-    storage.save_user_token.assert_awaited_once()
-    module.config.bot.send_message.assert_not_awaited()
+        sys.modules["tg_bot.user_end"].continue_setup.assert_not_awaited()
 
 
 def test_oauth_redirect_without_path_uses_root_route(server):

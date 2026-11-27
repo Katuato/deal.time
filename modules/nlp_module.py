@@ -364,6 +364,20 @@ def resolve_date(phrase: Optional[str], now: datetime) -> Optional[datetime]:
             return base.replace(year=y, month=mo, day=d, hour=0, minute=0)
         except ValueError:
             return None
+    # "15.11", "01.03.2027": dateparser читает "15.11" как время 15:11 сегодня, разбираем сами
+    m = re.fullmatch(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?", p)
+    if m:
+        d, mo = int(m.group(1)), int(m.group(2))
+        y = int(m.group(3)) if m.group(3) else base.year
+        if m.group(3) and y < 100:
+            y += 2000
+        try:
+            dt = datetime(y, mo, d)
+            if not m.group(3) and dt.date() < base.date():
+                dt = datetime(y + 1, mo, d)   # "01.03" в ноябре - март следующего года
+            return dt
+        except ValueError:
+            return None
     is_next = "следующ" in p
     p = re.sub(r"следующ\w+\s+", "", p)
     dt = dateparser.parse(p, languages=["ru"], settings={"RELATIVE_BASE": base, "PREFER_DATES_FROM": "future"})
@@ -496,7 +510,11 @@ def find_timezone(text: str) -> Optional[str]:
     m = re.search(r"\b(мск|utc|gmt)\s*([+-])\s*(\d{1,2})\b", t)
     if m:
         off = int(m.group(3)) * (1 if m.group(2) == "+" else -1) + (3 if m.group(1) == "мск" else 0)
-        return "UTC%+03d:00" % off
+        # IANA-название: Google Календарь принимает только такие. В Etc/GMT знак обратный:
+        # UTC+5 - это Etc/GMT-5 (так же пояс сохраняет /timezone)
+        if off == 0:
+            return "Etc/UTC"
+        return "Etc/GMT%+d" % -off if -14 <= off <= 14 else None
     m = re.search(r"\bпо\s+(?:времени\s+)?(%s)\w*" % alt(TZ_NAMES), t) or re.search(r"\b(мск)\b", t)
     return TZ_NAMES[m.group(1)] if m else None
 
@@ -836,6 +854,8 @@ def fill_datetimes(ev: Event, now: Optional[datetime], tz: str) -> None:
             start = min(candidates)
         elif not ev.date and start <= now:
             start += timedelta(days=1)   # "в 10:00", а уже полдень - значит завтра
+        elif low(ev.date) in WD_ACC and start <= now:
+            start += timedelta(days=7)   # "в понедельник в 10" в понедельник после 10 - следующий
     else:
         return
     ev.starts_at = start.isoformat()
@@ -1161,6 +1181,8 @@ def selftest() -> None:
         ("пятого числа в 10:00", None, dict(starts_at="2026-11-05T10:00:00+03:00")),
         ("25 ноября в полдень", None, dict(starts_at="2026-11-25T12:00:00+03:00")),
         ("в 7.30 вечера", None, dict(time="19:30")),
+        ("15.11 в 10:00", None, dict(date="15.11", starts_at="2026-11-15T10:00:00+03:00")),
+        ("01.03 в 9:00", None, dict(starts_at="2027-03-01T09:00:00+03:00")),
         ("через полчасика созвон", {"intent": None}, dict(intent="create", in_minutes=30)),
         ("по средам с 19:00 до 20:30 созвон", None,
          dict(rrule="FREQ=WEEKLY;BYDAY=WE", end_time="20:30", duration_minutes=90,
@@ -1293,6 +1315,23 @@ def dialogue_result(ev: Optional[Event], *, tz: str, now: datetime,
             "target_event_id": target_event_id}
 
 
+def is_new_agreement(draft: Event, incoming: Optional[Event], text: str) -> bool:
+    """Новое сообщение - отдельная договорённость, а не ответ на уточнение черновика:
+    модель нашла create со своей темой (не "Встреча" по умолчанию и не тема черновика),
+    и в самом сообщении есть и тема, и когда."""
+    if incoming is None or incoming.intent != "create" or draft.intent != "create":
+        return False
+    defaults = {low(s) for s in DEFAULT_SUMMARY.values()}
+    if low(draft.summary or "") in defaults:
+        return False   # "давай встретимся в кафе" -> "завтра в 15:00 кофе": уточнение темы, а не новая встреча
+    summary = low(incoming.summary or "")
+    if not summary or summary in defaults:
+        return False
+    if summary[:4] == low(draft.summary or "")[:4]:
+        return False
+    return has_when(text) and has_topic(text)
+
+
 def process_dialogue_message(text: str, state: DialogueState, *,
                              message_time: Optional[datetime] = None,
                              tz: str = DEFAULT_TZ, target_event_id=None,
@@ -1338,6 +1377,12 @@ def process_dialogue_message(text: str, state: DialogueState, *,
     if result.get("status") == "error":
         return result
     incoming = Event.model_validate(result["event"]) if result.get("event") else None
+    if state.event is not None and is_new_agreement(state.event, incoming, normalized):
+        # "завтра в 15:00 созвон с Петей" после висящего "хочешь в зал?" - это другая встреча,
+        # а не уточнение черновика: начинаем новый черновик вместо склейки
+        state.event = None
+        state.target_event_id = None
+        state.reference_time = None
     if state.event is None:
         ev = incoming
     else:
