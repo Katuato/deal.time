@@ -1,7 +1,6 @@
 import asyncio
 import html
 from datetime import datetime
-from io import BytesIO
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router, types
@@ -21,31 +20,16 @@ from modules.nlp_module import (process_dialogue_message, DialogueState, DEFAULT
                                  merge_clarification, get_zone, Event as NlpEvent, fill_datetimes,
                                  to_event_record, MAX_TEXT_LEN)
 
+from modules.speech_runtime import initialize_stt as initialize_stt, transcribe_telegram
 import tg_bot.keyboards as keyb
 
 rt = Router()
 dialogue_states: dict[tuple[int, int], DialogueState] = {}
-_stt = None
-_stt_lock = asyncio.Lock()
-
-
-async def initialize_stt():
-    global _stt
-    async with _stt_lock:
-        if _stt is None:
-            from modules.stt_module import STTProcessor
-
-            _stt = await asyncio.to_thread(STTProcessor)
-        return _stt
 
 
 async def _transcribe_voice(voice: types.Voice) -> str | None:
     try:
-        processor = await initialize_stt()
-        async with _stt_lock:
-            with BytesIO() as audio:
-                await bot.download(voice, destination=audio)
-                return await asyncio.to_thread(processor.transcribe, audio.getvalue())
+        return await transcribe_telegram(voice, bot)
     except Exception as error:
         logger.warning("Не удалось обработать голосовое сообщение (%s)", type(error).__name__)
         return None
