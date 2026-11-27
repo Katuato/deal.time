@@ -141,6 +141,12 @@ async def _handle_message(msg: types.Message):
     text = text.strip()[:MAX_TEXT_LEN]
     tz = user.timezone if user is not None and user.timezone else DEFAULT_TZ
     dialogue_state = dialogue_states.setdefault(dialogue_key, DialogueState())
+    if dialogue_state.sent is not None:
+        # по показанной карточке уже решили (добавили, отклонили, удалили) — разговор о ней
+        # закончен; иначе следующая договорённость склеится со старым черновиком и его датой
+        shown = await get_event(dialogue_state.sent["event_id"])
+        if shown is None or shown.status != "draft":
+            dialogue_state.reset()
     # Telegram ставит дату с точностью до секунды; если сообщение всё же «старше» предыдущего,
     # считаем его отправленным одновременно, а не отбрасываем
     message_time = msg.date
@@ -165,6 +171,8 @@ async def _handle_message(msg: types.Message):
         guessed = _guess_ambiguous_time(answ, msg.date, tz)
         if guessed is not None:
             answ, status = guessed, "ok"
+            # запоминаем угаданное: «к 18» после «пары к 12» (завтра) — тоже завтра
+            dialogue_state.event = NlpEvent.model_validate(guessed["event"])
     if status != "ok" or intent != "create":
         return
     # Черновик не сбрасываем: «давай лучше в 20» после карточки меняет её, а не теряется.
@@ -199,7 +207,11 @@ def _guess_ambiguous_time(answ: dict, message_time: datetime, tz: str) -> dict |
     fill_datetimes(ev, message_time, tz)
     if not ev.starts_at:
         return None
-    return {**answ, "status": "ok", "event": {**raw, "starts_at": ev.starts_at, "ends_at": ev.ends_at}}
+    if not ev.date:
+        today = message_time.astimezone(get_zone(tz) or ZoneInfo(DEFAULT_TZ)).date()
+        ev.date = "сегодня" if datetime.fromisoformat(ev.starts_at).date() == today else "завтра"
+    # время выбрано — вопрос «00:00 или 12:00?» на карточке больше не нужен
+    return {**answ, "status": "ok", "clarify": None, "missing": [], "event": ev.model_dump()}
 
 
 class EditEvent(StatesGroup):

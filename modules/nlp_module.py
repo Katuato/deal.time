@@ -33,6 +33,7 @@ DEFAULT_TZ = "Europe/Moscow"
 MAX_TEXT_LEN = 1500
 MAX_CTX_LEN = 300
 MAX_NEW_TOKENS = 64
+DIALOGUE_TIMEOUT = 15 * 60   # секунд тишины, после которых черновик в диалоге забывается
 
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
               "сентября", "октября", "ноября", "декабря"]
@@ -1239,6 +1240,11 @@ def selftest() -> None:
     assert (ev.time, ev.time_ambiguous) == ("15:00", False), ev
     ev = merge_clarification(run("в пятницу в 10:00"), "лучше в 11", now)
     assert (ev.time, ev.time_ambiguous) == ("11:00", True), ev
+    draft = run("Привет! Пойдешь на пары к 12?", {"intent": "create", "summary": "Пары"})
+    assert not is_new_agreement(draft, run("Не, я пойду к 18", {"intent": "create", "summary": "Перенос на 18"}),
+                                "Не, я пойду к 18")
+    assert is_new_agreement(draft, run("завтра в 15:00 созвон с Петей", {"intent": "create", "summary": "Созвон"}),
+                            "завтра в 15:00 созвон с Петей")
     ev = merge_clarification(run("давай в пятницу в 10"), "давай в 11 вечера", now)
     assert (ev.time, ev.starts_at) == ("23:00", "2026-11-06T23:00:00+03:00"), ev
     assert parse_json('{"intent": "move", "summary": "Перенос", "recurrence": "по }",') == \
@@ -1246,24 +1252,12 @@ def selftest() -> None:
     print("selftest: OK")
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("text", nargs="*")
-    args, _ = ap.parse_known_args()
-    if args.selftest:
-        selftest()
-    if args.text:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-        print(json.dumps(extract_entities(" ".join(args.text)), ensure_ascii=False, indent=2))
-
-
 # ---------------------------------------------------------------- диалог и проверка результата
 
 class DialogueState:
     """Черновик одного пользователя в одном чате; не разделяется между диалогами."""
 
-    def __init__(self, timeout_seconds: int = 1800):
+    def __init__(self, timeout_seconds: int = DIALOGUE_TIMEOUT):
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds должен быть положительным")
         self.timeout_seconds = timeout_seconds
@@ -1336,6 +1330,11 @@ def is_new_agreement(draft: Event, incoming: Optional[Event], text: str) -> bool
     if not summary or summary in defaults:
         return False
     if summary[:4] == low(draft.summary or "")[:4]:
+        return False
+    # тема должна быть в самом сообщении: на "не, я пойду к 18" модель может придумать
+    # "Перенос на 18", но это ответ про ту же встречу
+    t = low(text)
+    if not any(w[:4] in t for w in re.findall(r"[а-яa-z]{4,}", summary)):
         return False
     return has_when(text) and has_topic(text)
 
@@ -1583,7 +1582,7 @@ class DialogueSession:
     задачи. Класс не выполняет запись в календарь или базу данных.
     """
 
-    def __init__(self, timeout_seconds: int = 1800):
+    def __init__(self, timeout_seconds: int = DIALOGUE_TIMEOUT):
         self._state = DialogueState(timeout_seconds=timeout_seconds)
 
     def process(self, text: str, *, message_time: Optional[datetime] = None,
@@ -1601,3 +1600,15 @@ class DialogueSession:
 
     def reset(self) -> None:
         self._state.reset()
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("text", nargs="*")
+    args, _ = ap.parse_known_args()
+    if args.selftest:
+        selftest()
+    if args.text:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+        print(json.dumps(extract_entities(" ".join(args.text)), ensure_ascii=False, indent=2))

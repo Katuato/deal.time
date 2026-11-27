@@ -248,7 +248,8 @@ async def test_chat_correction_updates_the_shown_card(handlers):
     handlers.add_event.side_effect = add_event
     handlers.update_event.side_effect = update_event
     handlers.get_event.side_effect = lambda event_id: SimpleNamespace(rrule=None, **{
-        "title": stored["title"], "starts_at": stored["starts_at"], "location": stored.get("location")})
+        "title": stored["title"], "starts_at": stored["starts_at"], "location": stored.get("location"),
+        "status": stored["status"]})
     handlers.bot.send_message.return_value = SimpleNamespace(message_id=100)
     handlers.bot.edit_message_text = AsyncMock()
 
@@ -267,3 +268,65 @@ async def test_chat_correction_updates_the_shown_card(handlers):
     assert [e.kwargs["message_id"] for e in edits] == [100, 100]   # завтра в 18, затем в 20; «Хорошо!» не трогает
     assert "28.11.2026 в 20:00" in edits[-1].kwargs["text"]
     assert handlers.bot.send_message.await_count == 1
+
+
+async def test_processed_card_is_forgotten_and_reply_updates_new_card(handlers):
+    """Старая карточка уже отклонена. «Привет! Пойдешь на пары к 12?» — новая карточка
+    без даты старой, без вопроса «00:00 или 12:00?»; «Не, я пойду к 18» — правит её же,
+    хотя модель назвала это «Перенос на 18»."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from modules import nlp_module as nlp
+
+    answers = {
+        "Давай встретимся 12.12 в 15:00": {"intent": "create", "summary": "Встреча"},
+        "Привет! Пойдешь на пары к 12?": {"intent": "create", "summary": "Пары"},
+        "Не, я пойду к 18": {"intent": "move", "summary": "Перенос на 18"},
+    }
+
+    def extractor(text, context=None, message_time=None, tz=nlp.DEFAULT_TZ):
+        ev = nlp.postprocess(text, answers[text], context, message_time, tz)
+        return {"status": "ok", "event": ev.model_dump() if ev.intent else None,
+                "clarify": nlp.clarify_question(ev)}
+
+    handlers.process_dialogue_message = (
+        lambda **kw: nlp.process_dialogue_message(extractor=extractor, **kw))
+    handlers.get_user.return_value = SimpleNamespace(timezone="Europe/Moscow")
+    events = {}
+
+    async def add_event(**fields):
+        event_id = len(events) + 1
+        events[event_id] = dict(fields, status="draft")
+        return event_id
+
+    async def update_event(event_id, draft_user_id=None, **fields):
+        if events[event_id]["status"] != "draft":
+            return False
+        events[event_id].update(fields)
+        return True
+
+    handlers.add_event.side_effect = add_event
+    handlers.update_event.side_effect = update_event
+    handlers.get_event.side_effect = lambda event_id: SimpleNamespace(
+        rrule=None, location=None, **{k: events[event_id][k] for k in ("title", "starts_at", "status")})
+    handlers.bot.send_message.return_value = SimpleNamespace(message_id=100)
+    handlers.bot.edit_message_text = AsyncMock()
+
+    def message(text):
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=1, type="private", full_name="Контакт", username=None),
+            business_connection_id="business-connection", voice=None, text=text,
+            date=datetime(2026, 11, 27, 10, 48, tzinfo=ZoneInfo("UTC")))   # 13:48 по Москве
+
+    await handlers.new_message(message("Давай встретимся 12.12 в 15:00"))
+    events[1]["status"] = "declined"   # пользователь нажал «Не добавлять»
+    await handlers.new_message(message("Привет! Пойдешь на пары к 12?"))
+    await handlers.new_message(message("Не, я пойду к 18"))
+
+    assert len(events) == 2
+    assert events[2]["title"] == "Пары"
+    assert events[2]["starts_at"] == datetime(2026, 11, 28, 18, 0)   # не 12.12
+    card = handlers.bot.send_message.await_args_list[-1].kwargs["text"]
+    assert "Уточните время" not in card
+    assert "28.11.2026 в 18:00" in handlers.bot.edit_message_text.await_args.kwargs["text"]
