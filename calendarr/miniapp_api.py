@@ -195,7 +195,7 @@ def event_json(event: Event, user: User, chat_title: str | None, operation: str 
         sync = "Ожидает синхронизации"
     elif operation == "failed" or event.status == "failed":
         sync = "Ошибка синхронизации"
-    link = event.google_html_link or ""
+    link = (event.google_html_link or "").strip()
     return {
         "id": str(event.id), "title": event.title or "Встреча",
         "date": start.date().isoformat(), "time": start.strftime("%H:%M"), "end": end.strftime("%H:%M"),
@@ -205,7 +205,10 @@ def event_json(event: Event, user: User, chat_title: str | None, operation: str 
         "repeat": repeat_label(event.rrule), "status": STATUSES[event.status], "sync": sync,
         "seriesId": str(event.id) if event.rrule else None, "timezone": zone(event.timezone).key,
         "location": event.location, "participants": event.participants or [],
-        "html_link": link if link.startswith("https://calendar.google.com/") else None,
+        "html_link": link if link.startswith((
+            "https://calendar.google.com/", "https://www.google.com/calendar/event?",
+            "https://www.google.com/calendar/event/",
+        )) else None,
     }
 
 
