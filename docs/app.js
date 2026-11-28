@@ -114,7 +114,7 @@ function agendaDate(date) {
 function shortDate(date){const d=new Date(`${date}T12:00:00`);return new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long'}).format(d)}
 function eventsFor(date){return state.events.filter(e=>e.date===date).sort((a,b)=>a.time.localeCompare(b.time))}
 function renderOnboarding(){return `<div class="onboarding"><main class="screen"><img class="onboard-logo" src="./assets/logo.png" alt="Делу.Время"><p class="onboard-tag">сервис для поиска договоренностей в сообщениях и создания событий в Google Calendar</p><div class="greeting"><small>${dateLabel(state.selectedDate)}</small><h1>Привет!<br>Какие планы на сегодня?</h1><svg class="wave-rule" viewBox="0 0 340 28" preserveAspectRatio="none"><path d="M0 23C61 29 101 2 137 10c17 4 19 20 38 14S230 0 253 7s17 28 46 19 33-16 41-19"/></svg></div><div class="onboard-cta"><p>${onboardStep===1?'Чтобы начать планирование необходимо подключить Telegram Business':'Давай посмотрим, о каких событиях и встречах ты уже успел договориться'}</p><svg class="onboard-arrow" viewBox="0 0 80 75"><path d="M28 5C-7 18 6 58 26 55c27-3 5-48-14-19S22 78 74 63m-12-9 12 9-9 11"/></svg><button class="btn teal" data-action="onboard">${onboardStep===1?'Подключить':'Мои планы'}</button></div></main>${footer()}</div>`}
-function renderHome(){const list=eventsFor(state.selectedDate);const shown=state.showAllHome?list:list.slice(0,3);return `${header()}<main class="screen with-tabs"><div class="card home-date">${agendaDate(state.selectedDate)}</div><div class="home-agenda">${shown.map(e=>`<button class="card home-event clickable" data-event="${esc(e.id)}"><span class="time">${esc(e.time)} – ${esc(e.end)} ${e.repeat && e.repeat !== 'Не повторяется' ? `<strong>${esc(e.repeat)}</strong>` : ''}</span><span class="card-title">${esc(e.title)}</span></button>`).join('')||'<div class="card empty">На этот день пока нет событий</div>'}</div>${list.length>3?`<button class="btn show-more" data-action="show-more">${state.showAllHome?'Скрыть':'Показать больше'}</button>`:''}<div class="voice-panel"><button class="voice-button" data-action="voice">${icon('voice')}<span>Голос</span></button><button class="voice-button" data-action="parse">${icon('mic')}<span>Разобрать</span></button></div></main>${tabs('home')}${footer()}`}
+function renderHome(){const list=eventsFor(state.selectedDate);const shown=state.showAllHome?list:list.slice(0,3);return `${header()}<main class="screen with-tabs"><div class="card home-date">${agendaDate(state.selectedDate)}</div><div class="home-agenda">${shown.map(e=>`<button class="card home-event clickable" data-event="${esc(e.id)}"><span class="time">${esc(e.time)} – ${esc(e.end)} ${e.repeat && e.repeat !== 'Не повторяется' ? `<strong>${esc(e.repeat)}</strong>` : ''}</span><span class="card-title">${esc(e.title)}</span></button>`).join('')||'<div class="card empty">На этот день пока нет событий</div>'}</div>${list.length>3?`<button class="btn show-more" data-action="show-more">${state.showAllHome?'Скрыть':'Показать больше'}</button>`:''}<div class="voice-panel"><button class="voice-button" data-action="voice" aria-label="Удерживайте для записи голоса">${icon('voice')}<span aria-live="polite">Удерживайте для записи</span></button><button class="voice-button" data-action="parse">${icon('mic')}<span>Разобрать</span></button></div></main>${tabs('home')}${footer()}`}
 function renderCalendar(){const first=new Date(state.year,state.month,1);const days=new Date(state.year,state.month+1,0).getDate();const offset=(first.getDay()+6)%7;const selected=state.selectedDate;const months=[...Array(12)].map((_,i)=>`<option value="${i}" ${i===state.month?'selected':''}>${new Intl.DateTimeFormat('ru-RU',{month:'long'}).format(new Date(2026,i,1)).toUpperCase()}</option>`).join('');const years=[...new Set([state.year,...Array.from({length:11},(_,i)=>new Date().getFullYear()-5+i),...state.events.map(e=>Number(e.date.slice(0,4)))])].sort((a,b)=>a-b).map(y=>`<option value="${y}" ${y===state.year?'selected':''}>${y}</option>`).join('');const dayCells=[...Array(offset)].map(()=>'<span></span>').concat([...Array(days)].map((_,i)=>{const date=`${state.year}-${String(state.month+1).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`;return `<button class="calendar-day ${date===selected?'selected':''} ${eventsFor(date).length?'has-event':''}" data-date="${date}" aria-label="${dateLabel(date)}">${i+1}</button>`}));return `${header()}<main class="screen with-tabs"><div class="calendar-box"><div class="calendar-controls"><span class="select-wrap"><select id="month-select" aria-label="Месяц">${months}</select></span><span class="select-wrap"><select id="year-select" aria-label="Год">${years}</select></span></div><div class="calendar-grid">${['ПН','ВТ','СР','ЧТ','ПТ','СБ','ВС'].map(d=>`<span class="calendar-weekday">${d}</span>`).join('')}${dayCells.join('')}</div></div><div class="card calendar-agenda"><h2>${agendaDate(selected)}</h2>${eventsFor(selected).map(e=>`<div class="agenda-line"><time>${esc(e.time)}</time><button data-event="${esc(e.id)}">${esc(e.title)}</button></div>`).join('')||'<p class="empty">На выбранную дату событий нет</p>'}</div></main>${tabs('calendar')}${footer()}`}
 function renderTasks(){const done=state.taskTab==='done';const filtered=state.tasks.filter(t=>Boolean(t.done)===done);return `${header()}<main class="screen with-tabs"><h1 class="page-title">Мои задачи</h1><div class="segmented"><button data-action="task-tab" data-value="active" class="${!done?'selected':''}">Активные</button><button data-action="task-tab" data-value="done" class="${done?'selected':''}">Выполненные</button></div><div class="task-list">${filtered.map(t=>`<button class="card task-card clickable ${done?'done':''}" data-task="${esc(t.id)}">${done?`<span class="done-mark">${icon('checked')}</span>`:''}<span class="card-title">${esc(t.title)} ${done?`<span class="task-menu">${icon('ellipsis')}</span>`:''}</span><span class="subtitle">${shortDate(t.date)} · ${esc(t.time)}</span></button>`).join('')||`<div class="card empty">${done?'Выполненных задач пока нет':'Активных задач пока нет'}</div>`}</div>${!done?'<button class="btn task-add" data-nav="task-new">+ Добавить</button>':''}</main>${tabs('tasks')}${footer()}`}
 function renderSettings(){return `${header(false)}<main class="screen">${subhead('settings','Настройки','home')}<div class="settings-list"><div class="settings-item"><strong>Уведомления</strong><button class="toggle ${state.notificationsEnabled?'on':''}" data-action="toggle-notifications" aria-pressed="${state.notificationsEnabled}">${state.notificationsEnabled?'Вкл':'Выкл'}</button></div>${[['Google Calendar',state.googleConnected?'Подключён':'Не подключён','google'],['Доступ к чатам','Посмотреть разрешения','chats'],['Статистика','События и задачи','stats'],['Согласие и данные','Политика обработки данных','privacy'],['Тема',state.theme==='telegram'?'Как в Telegram':state.theme==='light'?'Светлая':'Тёмная','theme'],['FAQ','Часто задаваемые вопросы','faq'],['Поддержка','','support']].map(([title,subtitle,target])=>`<button class="settings-item clickable" data-nav="${target}"><span><strong>${title}</strong>${subtitle?`<span class="muted">${subtitle}</span>`:''}</span><span class="chevron">${icon('back')}</span></button>`).join('')}</div></main>${footer()}`}
@@ -166,8 +166,13 @@ app.addEventListener('click',async ev=>{
   if(name==='toggle-notifications'){const enabled=!state.notificationsEnabled;if(!DEMO_MODE){try{await DealenderApi.notificationSettings(enabled);state.notificationsEnabled=enabled;render();feedback(enabled?'Уведомления включены':'Уведомления выключены')}catch(error){feedback(error.message)}return}state.notificationsEnabled=enabled;persist();render();feedback(state.notificationsEnabled?'Уведомления включены':'Уведомления выключены');return}
   if(name==='filter'){state.filterOpen=!state.filterOpen;render();return}
   if(name==='parse'){modal='parse';render();return}
-  if(name==='voice-finish'){finishVoice();return}
-  if(name==='voice'){startVoice();return}
+  if(name==='voice-confirm'){confirmVoice();return}
+  if(name==='voice-type'){showVoiceText(voiceSession, '');return}
+  if(name==='voice'){
+    // Assistive technology can activate a button without pointer or key events.
+    if(ev.detail===0){if(voiceSession?.trigger==='toggle') releaseVoice(voiceSession); else startVoice('toggle')}
+    return;
+  }
   if(name==='exclude-chat'){modal={title:'Исключённые чаты',text:'Выбранные чаты будут исключены из распознавания событий.',action:'confirm-exclude',button:'Понятно'};render();return}
   if(name==='confirm-exclude'){modal=null;render();return}
   if(name==='google-connect'){if(DEMO_MODE){if(state.googleConnected){modal={title:'Отключить календарь?',text:'Демо-режим: это действие не меняет подключение Google.',action:'confirm-disconnect',button:'Отключить'}}else{feedback('Демо-режим: подключение Google не выполняется')}render();return}if(state.googleConnected){modal={title:'Отключить календарь?',text:'Синхронизация с Google Calendar прекратится.',action:'confirm-disconnect',button:'Отключить'};render();return}try{const result=await DealenderApi.googleConnect();if(!result?.authorization_url||!/^https:\/\//i.test(result.authorization_url))throw new Error('Сервер не вернул безопасную ссылку Google OAuth.');if(tg?.openLink)tg.openLink(result.authorization_url);else window.location.assign(result.authorization_url)}catch(error){feedback(error.message)}return}
@@ -201,142 +206,190 @@ app.addEventListener('submit',async ev=>{
 });
 let voiceSession = null;
 const recordingLimitMs = 40000;
+const voiceButtonSelector = '[data-action="voice"]';
 
 function renderVoiceDialog() {
   const {phase, message} = voiceSession;
-  const label = {recording: 'Завершить и распознать', ready: 'Распознать запись', listening: 'Завершить ввод'}[phase];
   return `<div class="modal-overlay" data-action="modal-close"><div class="modal-card" role="dialog" aria-modal="true" aria-label="Голосовой ввод">
     <h2>Голосовой ввод</h2><p role="status">${esc(message)}</p>
     <div class="btn-row"><button class="btn soft" data-action="modal-close">Отмена</button>
-    ${label ? `<button class="btn blue" data-action="voice-finish">${label}</button>` : ''}</div></div></div>`;
+    ${phase === 'ready' ? '<button class="btn blue" data-action="voice-confirm">Подтвердить</button>' : ''}
+    ${phase === 'oversize' ? '<button class="btn blue" data-action="voice-type">Ввести текст</button>' : ''}</div></div></div>`;
 }
 
 function cancelVoice() {
-  const session = voiceSession;
-  if (!session) return;
+  const s = voiceSession;
+  if (!s) return;
   voiceSession = null;
-  clearTimeout(session.timer);
-  session.abort.abort();
-  if (session.recorder?.state === 'recording') session.recorder.stop();
-  session.stream?.getTracks().forEach(track => track.stop());
-  session.recognition?.abort();
+  clearTimeout(s.timer);
+  s.abort.abort();
+  if (s.recorder?.state === 'recording') s.recorder.stop();
+  s.stream?.getTracks().forEach(track => track.stop());
+  s.recognition?.abort();
 }
 
-function showVoiceText(session, text, hint) {
-  if (session !== voiceSession) return;
+function discardVoice() {
+  cancelVoice();
+  modal = null;
+  render();
+}
+
+function showVoiceText(s, text, hint) {
+  if (s !== voiceSession) return;
   cancelVoice();
   modal = 'parse';
   render();
   const input = app.querySelector('#parse-form textarea');
   input.value = text;
-  if (hint) {
-    const note = app.querySelector('.modal-card p');
-    note.textContent = hint;
-  }
+  if (hint) app.querySelector('.modal-card p').textContent = hint;
   input.focus();
 }
 
-function voiceProblem(session, error) {
+function voiceProblem(s, error) {
   const denied = ['NotAllowedError', 'SecurityError', 'not-allowed', 'service-not-allowed'].includes(error);
-  const hint = denied ? 'Нет доступа к микрофону. Разрешите его для Telegram в настройках телефона или используйте диктовку клавиатуры.'
-                      : 'Запись недоступна. Введите текст или включите диктовку на клавиатуре.';
-  showVoiceText(session, '', hint);
+  showVoiceText(s, '', denied ? 'Разрешите Telegram доступ к микрофону или воспользуйтесь диктовкой клавиатуры.'
+                             : 'Записать голос не удалось. Попробуйте ещё раз или воспользуйтесь диктовкой клавиатуры.');
 }
 
-function startBrowserRecognition(session) {
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Recognition) return voiceProblem(session, 'unavailable');
-  const recognition = session.recognition = new Recognition();
-  recognition.lang = 'ru-RU';
-  recognition.interimResults = false;
-  recognition.onresult = e => showVoiceText(session, e.results[0][0].transcript, '');
-  recognition.onerror = e => voiceProblem(session, e.error);
-  recognition.onend = () => { if (voiceSession === session) showVoiceText(session, '', 'Речь не распознана. Повторите ввод или используйте диктовку клавиатуры.'); };
-  recognition.start();
-  session.phase = 'listening';
-  session.message = 'Говорите. Распознанный текст можно будет отредактировать.';
-  render();
-}
-
-async function sendVoice(session) {
-  if (voiceSession !== session || !session.blob || session.phase === 'sending') return;
-  session.phase = 'sending';
-  session.message = 'Распознаём запись…';
-  render();
-  try {
-    const {text} = await DealenderApi.transcribeVoice(session.blob, session.abort.signal);
-    if (typeof text !== 'string' || !text.trim()) throw Error('Речь не распознана.');
-    showVoiceText(session, text, '');
-  } catch (error) {
-    if (voiceSession !== session) return;
-    session.phase = 'ready';
-    session.message = error.message;
-    render();
-  }
-}
-
-function finishVoice() {
-  const session = voiceSession;
-  if (!session) return;
-  if (session.phase === 'ready') return sendVoice(session);
-  if (session.phase === 'listening') return session.recognition.stop();
-  if (session.recorder?.state === 'recording') {
-    session.sendAfterStop = true;
-    session.recorder.stop();
-  }
-}
-
-async function startVoice() {
-  if (voiceSession) return;
-  const session = voiceSession = {phase: 'opening', message: 'Запрашиваем доступ к микрофону…', abort: new AbortController()};
+function reviewVoice(s) {
+  if (s !== voiceSession) return;
+  clearTimeout(s.timer);
+  s.phase = 'ready';
+  s.message = s.blob ? 'Отправить запись на распознавание?' : s.text;
   modal = 'voice';
   render();
+}
+
+async function confirmVoice() {
+  const s = voiceSession;
+  if (s?.phase !== 'ready') return;
+  if (s.text) return showVoiceText(s, s.text);
+  s.phase = 'sending';
+  s.message = 'Распознаём запись…';
+  render();
   try {
-    const mime = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
-      .find(type => window.MediaRecorder?.isTypeSupported?.(type));
-    if (DEMO_MODE || !mime || !navigator.mediaDevices?.getUserMedia) return startBrowserRecognition(session);
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-    if (session !== voiceSession || document.hidden) {
-      stream.getTracks().forEach(track => track.stop());
-      if (session === voiceSession) { cancelVoice(); modal = null; render(); }
-      return;
-    }
-    session.stream = stream;
-    const recorder = session.recorder = new MediaRecorder(stream, {mimeType:mime, audioBitsPerSecond:64000});
-    const chunks = [];
-    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-    recorder.onerror = () => voiceProblem(session, 'recorder');
-    recorder.onstop = () => {
-      clearTimeout(session.timer);
-      stream.getTracks().forEach(track => track.stop());
-      if (session !== voiceSession) return;
-      session.blob = new Blob(chunks, {type:recorder.mimeType || mime});
-      if (!session.blob.size || session.blob.size > 2097152) {
-        showVoiceText(session, '', 'Не удалось сохранить запись. Запишите фразу короче или используйте диктовку клавиатуры.');
-        return;
-      }
-      session.phase = 'ready';
-      session.message = 'Запись завершена. Отправить её на распознавание?';
-      if (session.sendAfterStop) sendVoice(session); else render();
-    };
-    recorder.start();
-    session.phase = 'recording';
-    session.message = 'Идёт запись. До 40 секунд. Нажмите «Завершить и распознать», чтобы отправить голос на сервер.';
-    session.timer = setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, recordingLimitMs);
-    render();
+    const {text} = await DealenderApi.transcribeVoice(s.blob, s.abort.signal);
+    if (typeof text !== 'string' || !text.trim()) throw Error('Речь не распознана.');
+    showVoiceText(s, text);
   } catch (error) {
-    voiceProblem(session, error.name);
+    if (s !== voiceSession) return;
+    s.phase = error.status === 413 ? 'oversize' : 'ready';
+    s.message = error.status === 413
+      ? 'Сервер отклонил размер записи. Запишите фразу короче или введите текст.'
+      : error.message;
+    render();
   }
 }
 
-window.addEventListener('pagehide', () => {
-  if (voiceSession) { cancelVoice(); modal = null; render(); }
-});
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && voiceSession && ['recording','listening'].includes(voiceSession.phase)) {
-    cancelVoice(); modal = null; render();
+function releaseVoice(s) {
+  if (s !== voiceSession || !s || !['opening','recording'].includes(s.phase)) return;
+  if (s.phase === 'opening') {
+    discardVoice();
+    feedback('Когда микрофон будет доступен, удерживайте кнопку во время речи.');
+    return;
   }
+  clearTimeout(s.timer);
+  s.phase = 'stopping';
+  if (s.recorder) {
+    if (s.recorder.state === 'recording') s.recorder.stop();
+  } else if (s.recognitionEnded) {
+    if (s.text) reviewVoice(s); else voiceProblem(s, 'no-speech');
+  } else {
+    s.recognition.stop();
+  }
+}
+
+function browserVoice(s) {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) return voiceProblem(s, 'unavailable');
+  const recognition = s.recognition = new Recognition();
+  recognition.lang = 'ru-RU';
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.onresult = e => { s.text = Array.from(e.results, r => r[0].transcript).join(' ').trim(); };
+  recognition.onerror = e => voiceProblem(s, e.error);
+  recognition.onend = () => {
+    s.recognitionEnded = true;
+    if (s !== voiceSession || s.phase !== 'stopping') return;
+    if (s.text) reviewVoice(s); else voiceProblem(s, 'no-speech');
+  };
+  recognition.start();
+}
+
+async function startVoice(trigger) {
+  if (voiceSession) return;
+  const s = voiceSession = {trigger, phase:'opening', abort:new AbortController()};
+  const button = app.querySelector(voiceButtonSelector);
+  const label = button.querySelector('span');
+  label.textContent = 'Микрофон…';
+  try {
+    const mime = ['audio/mp4','audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus']
+      .find(type => window.MediaRecorder?.isTypeSupported?.(type));
+    if (DEMO_MODE || !mime || !navigator.mediaDevices?.getUserMedia) {
+      browserVoice(s);
+      if (voiceSession !== s) return;
+    } else {
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      if (s !== voiceSession || document.hidden) {
+        stream.getTracks().forEach(track => track.stop());
+        if (s === voiceSession) discardVoice();
+        return;
+      }
+      s.stream = stream;
+      const recorder = s.recorder = new MediaRecorder(stream, {mimeType:mime, audioBitsPerSecond:32000});
+      const chunks = [];
+      recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      recorder.onerror = () => voiceProblem(s, 'recorder');
+      recorder.onstop = () => {
+        stream.getTracks().forEach(track => track.stop());
+        if (voiceSession !== s) return;
+        s.blob = new Blob(chunks, {type:recorder.mimeType || mime});
+        if (!s.blob.size || s.blob.size > 2097152) {
+          showVoiceText(s, '', 'Запишите фразу короче или введите текст.');
+          return;
+        }
+        reviewVoice(s);
+      };
+      recorder.start();
+    }
+    s.phase = 'recording';
+    s.timer = setTimeout(() => releaseVoice(s), recordingLimitMs);
+    button.classList.add('recording');
+    label.textContent = trigger === 'toggle' ? 'Остановить' : 'Говорите…';
+  } catch (error) {
+    voiceProblem(s, error.name);
+  }
+}
+
+app.addEventListener('pointerdown', e => {
+  if (!e.target.closest(voiceButtonSelector) || !e.isPrimary || e.button !== 0 || voiceSession) return;
+  e.preventDefault();
+  app.setPointerCapture(e.pointerId);
+  startVoice(e.pointerId);
 });
+window.addEventListener('pointerup', e => {
+  if (voiceSession?.trigger === e.pointerId) releaseVoice(voiceSession);
+});
+function interruptPointer(e) {
+  if (voiceSession?.trigger === e.pointerId && ['opening','recording'].includes(voiceSession.phase)) discardVoice();
+}
+app.addEventListener('pointercancel', interruptPointer);
+app.addEventListener('lostpointercapture', interruptPointer);
+app.addEventListener('contextmenu', e => { if (e.target.closest(voiceButtonSelector) || e.target === app && voiceSession) e.preventDefault(); });
+app.addEventListener('keydown', e => {
+  if (!e.target.closest(voiceButtonSelector) || !['Space','Enter'].includes(e.code)) return;
+  e.preventDefault();
+  if (!e.repeat) startVoice(e.code);
+});
+window.addEventListener('keyup', e => {
+  if (voiceSession?.trigger === e.code) { e.preventDefault(); releaseVoice(voiceSession); }
+});
+function interruptHold() {
+  if (voiceSession && ['opening','recording','stopping'].includes(voiceSession.phase)) discardVoice();
+}
+window.addEventListener('blur', interruptHold);
+window.addEventListener('pagehide', () => { if (voiceSession) discardVoice(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) interruptHold(); });
 
 /* History, event details and access settings. */
 state.historyRange ||= { from: '', to: '' };
@@ -479,6 +532,8 @@ systemTheme.addEventListener('change', applyAppearance);
 const previousRender = render;
 render = function () {
   applyAppearance();
+  // Keep the focused button and active pointer intact during background data updates.
+  if (voiceSession && ['opening','recording','stopping'].includes(voiceSession.phase)) return;
   if (!DEMO_MODE && state.apiStatus !== 'ready') {
     app.innerHTML = renderApiStatus();
     return;

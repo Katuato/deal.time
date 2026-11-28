@@ -22,7 +22,9 @@
     if (!response.ok) {
       const message = payload?.error?.message || payload?.message;
       if (response.status === 401) throw new Error('Не удалось подтвердить Telegram-сессию. Закройте и снова откройте Mini App.');
-      throw new Error(message || `Ошибка сервера (${response.status}).`);
+      const error = new Error(message || `Ошибка сервера (${response.status}).`);
+      error.status = response.status;
+      throw error;
     }
     if (response.status !== 204 && (!payload || typeof payload !== 'object')) {
       throw new Error('Сервер вернул данные в неожиданном формате.');

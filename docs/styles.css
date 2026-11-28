@@ -252,3 +252,12 @@
 .live-chats .chat-row:hover { background: transparent; }
 .chat-actions { display: grid; gap: 10px; }
 .chat-actions .btn { margin: 0; min-height: 44px; }
+
+.voice-button[data-action="voice"] {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.voice-button[data-action="voice"] span { white-space: normal; line-height: 1.2; }
+.voice-button.recording { outline: 2px solid var(--coral); outline-offset: 2px; }
