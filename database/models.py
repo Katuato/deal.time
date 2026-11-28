@@ -241,6 +241,20 @@ async def get_event(event_id: int):
             return None
 
 
+async def get_user_events(user_id: int, limit: int = 10, exclude_statuses: tuple = ("declined", "deleted")):
+    '''последние события пользователя (сначала новые), без отклонённых и удалённых. Пустой список при ошибке'''
+    async with async_session() as session:
+        try:
+            query = (select(Event)
+                     .where(Event.user_id == user_id, Event.status.notin_(exclude_statuses))
+                     .order_by(Event.id.desc())
+                     .limit(limit))
+            return list((await session.execute(query)).scalars())
+        except Exception:
+            logger.exception("Ошибка в get_user_events (user_id=%s)", user_id)
+            return []
+
+
 async def add_event(user_id: int, chat_id: int, title: str, starts_at: datetime, timezone: str, status: str = "draft",
                     duration: Optional[timedelta] = None, ends_at: Optional[datetime] = None,
                     location: Optional[str] = None, participants: Optional[list[dict[str, Any]]] = None,
