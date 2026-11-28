@@ -4,6 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -281,11 +282,19 @@ def _event_card(ev) -> list[str]:
     return lines
 
 
+def _confirmed_status(link: str | None) -> str:
+    url = (link or "").strip()
+    if not url.startswith(("https://calendar.google.com/", "https://www.google.com/calendar/event?",
+                           "https://www.google.com/calendar/event/")):
+        url = "https://calendar.google.com/"
+    return f'✅ <a href="{html.escape(url)}">Событие добавлено в Google Календарь.</a>'
+
+
 def _card_text(ev) -> str:
     status = {
         "draft": "Выберите действие:",
         "queued": "⏳ Событие в очереди на добавление в Google Календарь.",
-        "confirmed": "✅ Событие добавлено в Google Календарь.",
+        "confirmed": _confirmed_status(ev.google_html_link),
         "failed": "⚠️ Не удалось добавить событие в Google Календарь.",
         "declined": "❌ Событие не добавлено.",
         "deleted": "🗑 Событие удалено из Google Календаря.",
@@ -299,12 +308,6 @@ def _event_kb(event_id: int):
     kb.button(text='✍️ Изменить', callback_data=f'ev:edit:{event_id}')
     kb.button(text='🚫 Не добавлять', callback_data=f'ev:del:{event_id}')
     kb.adjust(1)
-    return kb.as_markup()
-
-
-def _status_kb(event_id: int):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Проверить статус", callback_data=f"ev:show:{event_id}")
     return kb.as_markup()
 
 
@@ -434,6 +437,15 @@ def _calendar_event_data(ev):
 
 
 async def _add_to_calendar(call: types.CallbackQuery, ev):
+    card = {"chat_id": call.message.chat.id, "message_id": call.message.message_id}
+    if ev.status == "confirmed":
+        # Восстанавливаем карточку, если доставка результата ранее прервалась.
+        await call.answer("Событие уже добавлено.")
+        await _edit_result_card(card, _card_text(ev), _created_kb(ev))
+        return
+    if ev.status == "queued":
+        await call.answer("Событие уже в очереди. Карточка обновится автоматически.")
+        return
     if ev.status != "draft":
         await call.answer("Событие уже обработано.", show_alert=True)
         return
@@ -449,7 +461,7 @@ async def _add_to_calendar(call: types.CallbackQuery, ev):
         await call.answer()
         return
     try:
-        operation_id = await confirm_event_and_enqueue(ev.user_id, ev.id, _calendar_event_data)
+        operation_id = await confirm_event_and_enqueue(ev.user_id, ev.id, _calendar_event_data, telegram_card=card)
     except Exception as error:
         logger.warning("Не удалось поставить событие в очередь (%s)", type(error).__name__)
         await call.answer("Не удалось сохранить событие. Попробуйте ещё раз.", show_alert=True)
@@ -458,11 +470,9 @@ async def _add_to_calendar(call: types.CallbackQuery, ev):
         await call.answer("Событие уже обработано.", show_alert=True)
         return
 
-    wake_worker()  # не ждём интервала воркера; результат придёт сообщением (notify_queue_result)
+    # После подтверждения карточку меняет воркер: ответ Google может прийти сразу.
+    wake_worker()
     await call.answer("Добавляю в календарь…")
-    saved = await get_event(ev.id)
-    text = _card_text(saved) if saved is not None else "⏳ Событие поставлено в очередь."
-    await call.message.edit_text(text, reply_markup=_status_kb(ev.id))
 
 
 # ---------- Ошибки календаря ----------
@@ -513,6 +523,23 @@ def _with_reconnect(markup):
     return kb.as_markup()
 
 
+async def _edit_result_card(card: dict, text: str, markup) -> None:
+    for attempt in range(3):
+        try:
+            await bot.edit_message_text(chat_id=card["chat_id"], message_id=card["message_id"],
+                                        text=text, parse_mode="HTML", reply_markup=markup,
+                                        link_preview_options=types.LinkPreviewOptions(is_disabled=True))
+            return
+        except TelegramBadRequest as error:
+            if "message is not modified" in str(error).lower():
+                return
+            raise
+        except (TelegramRetryAfter, TelegramNetworkError, TelegramServerError) as error:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(error.retry_after if isinstance(error, TelegramRetryAfter) else 2 ** attempt)
+
+
 async def notify_queue_result(op: dict, outcome: str, result: dict) -> None:
     """Колбэк воркера очереди (run_worker(on_result=...)): операция из очереди выполнена
     или окончательно не удалась — обновляем статус события и сообщаем пользователю."""
@@ -529,11 +556,8 @@ async def notify_queue_result(op: dict, outcome: str, result: dict) -> None:
     if op["action"] == "create":
         if outcome == "done":
             # статус confirmed и google_event_id воркер уже записал (_finish)
-            link = result.get("html_link")
-            done = "✅ Добавлено в календарь"
-            if link:
-                done = f'<a href="{html.escape(link)}">{done}</a>'
-            text, markup = f"{card}\n\n{done}", _created_kb(ev)
+            done = _confirmed_status(result.get("html_link") or ev.google_html_link)
+            text, markup = f"Событие:\n{card}\n{done}", _created_kb(ev)
         else:
             await update_event(ev.id, status="draft")  # можно снова нажать «Добавить в календарь»
             if auth:
@@ -558,6 +582,10 @@ async def notify_queue_result(op: dict, outcome: str, result: dict) -> None:
                 text, markup = f"{card}\n\n❌ Не удалось {what}: {error}", _created_kb(ev)
 
     logger.info("Очередь: operation id=%s %s %s (events.id=%s)", op["id"], op["action"], outcome, ev.id)
+    target = op["data"].get("telegram_card")
+    if op["action"] == "create" and target:
+        await _edit_result_card(target, text, markup)
+        return
     await bot.send_message(chat_id=ev.user_id, text=text, reply_markup=markup,
                            disable_notification=not await notifications_enabled(ev.user_id))
 
@@ -651,7 +679,8 @@ async def action_event(call: types.CallbackQuery, state: FSMContext):
             if ev.status != "queued":
                 markup = (_event_kb(event_id) if ev.status == "draft"
                           else _created_kb(ev) if ev.status == "confirmed" else None)
-                await call.message.edit_text(_card_text(ev), reply_markup=markup)
+                await call.message.edit_text(_card_text(ev), reply_markup=markup,
+                                             link_preview_options=types.LinkPreviewOptions(is_disabled=True))
             else:
                 await call.answer("Событие ещё в очереди.")
                 return
