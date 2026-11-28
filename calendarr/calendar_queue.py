@@ -95,6 +95,8 @@ async def confirm_event_and_enqueue(
     user_id: int,
     event_id: int,
     build_event_data: Callable[[Event], dict[str, Any]],
+    *,
+    telegram_card: dict[str, int] | None = None,
 ) -> int | None:
     """Подтверждает событие владельца и сохраняет операцию до обращения к Google."""
     async with async_session.begin() as session:
@@ -106,7 +108,8 @@ async def confirm_event_and_enqueue(
         if event is None:
             return None
 
-        operation = stage_create(session, event, build_event_data(event))
+        metadata = {"telegram_card": telegram_card} if telegram_card is not None else {}
+        operation = stage_create(session, event, build_event_data(event), **metadata)
         await session.flush()
         op_id = operation.id
     logger.info("Подтверждение события сохранено, операция id=%s", op_id)
