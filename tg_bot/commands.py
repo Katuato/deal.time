@@ -13,7 +13,7 @@ from aiogram.types import (BotCommand, CallbackQuery, MenuButtonCommands, MenuBu
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import bot, logger
-from database.models import get_event, get_user, get_user_events
+from database.models import get_event, get_user_events, has_active_consent
 
 cm = Router()
 
@@ -94,6 +94,9 @@ async def command_help(msg: Message, state: FSMContext):
 
 # ---------- /history ----------
 
+NO_CONSENT_TEXT = "Согласие на обработку данных не действует, история недоступна. Чтобы продолжить, отправьте /start."
+
+
 def _short(text: str | None, limit: int = 28) -> str:
     text = (text or "Без названия").strip()
     return text if len(text) <= limit else text[:limit - 1] + "…"
@@ -137,15 +140,31 @@ def event_details(ev) -> str:
 @cm.message(Command("history"), F.chat.type == "private")
 async def command_history(msg: Message, state: FSMContext):
     await state.clear()
-    if await get_user(msg.from_user.id) is None:
-        await msg.answer("Сначала пройдите настройку: /start")
+    if not await has_active_consent(msg.from_user.id):
+        await msg.answer(NO_CONSENT_TEXT)
         return
     text, markup = await render_history(msg.from_user.id)
     await msg.answer(text, reply_markup=markup)
 
 
+async def _consent_or_deny(call: CallbackQuery) -> bool:
+    """Проверка согласия для кнопок истории. Старые кнопки остаются в чате и после отзыва
+    согласия, поэтому проверяем при каждом нажатии: без действующего согласия ничего не
+    показываем и убираем клавиатуру."""
+    if await has_active_consent(call.from_user.id):
+        return True
+    await call.answer(NO_CONSENT_TEXT, show_alert=True)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass  # сообщение могло быть удалено или устареть: отказ уже показан
+    return False
+
+
 @cm.callback_query(F.data.startswith("hist:show:"))
 async def history_show(call: CallbackQuery):
+    if not await _consent_or_deny(call):
+        return
     ev = await get_event(int(call.data.rsplit(":", 1)[1]))
     # чужие события открывать нельзя: сверяем владельца
     if ev is None or ev.user_id != call.from_user.id:
@@ -159,6 +178,8 @@ async def history_show(call: CallbackQuery):
 
 @cm.callback_query(F.data == "hist:list")
 async def history_list(call: CallbackQuery):
+    if not await _consent_or_deny(call):
+        return
     text, markup = await render_history(call.from_user.id)
     await call.message.edit_text(text, reply_markup=markup)
     await call.answer()

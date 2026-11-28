@@ -53,7 +53,6 @@ async def main():
             await check_database()
             await initialize_stt()
             await setup_bot_menu()
-            await setup_bot_menu()
 
             worker = asyncio.create_task(run_worker(DBTokenStorage(), on_result=notify_queue_result),
                                          name="calendar worker")
